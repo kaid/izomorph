@@ -28,7 +28,7 @@
 //! const json_str = try izo.json.encode(allocator, person, PersonMapper, .{});
 //!
 //! // Decode from JSON
-//! const decoded = try izo.json.decode(allocator, Person, PersonMapper, json_str);
+//! const decoded = try izo.json.decode(allocator, PersonMapper, json_str);
 //! ```
 
 const std = @import("std");
@@ -92,7 +92,7 @@ test "izomorph - full API usage" {
     try std.testing.expectEqualStrings("{\"person_name\":\"Alice\",\"age\":30}", json_str);
 
     // Decode JSON
-    const decoded = try json.decode(allocator, Person, PersonMapper, json_str);
+    const decoded = try json.decode(allocator, PersonMapper, json_str);
     try std.testing.expectEqualStrings("Alice", decoded.name);
     try std.testing.expectEqual(@as(u32, 30), decoded.age);
 }

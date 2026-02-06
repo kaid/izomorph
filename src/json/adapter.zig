@@ -503,14 +503,14 @@ pub fn encodeWithMapper(
 }
 
 /// Decode a value using its Mapper configuration
+/// Decode a value using its Mapper configuration  
 pub fn decodeWithMapper(
     allocator: std.mem.Allocator,
-    comptime T: type,
     comptime MapperType: type,
     json_str: []const u8,
-) !T {
+) !MapperType.TargetType {
     const Adapter = createAdapter(MapperType);
-
+    
     var scanner = std.json.Scanner.initCompleteInput(allocator, json_str);
     defer scanner.deinit();
 

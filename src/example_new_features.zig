@@ -77,7 +77,7 @@ test "roundtrip with defaults" {
     defer allocator.free(json);
 
     // Decode
-    const decoded = try izo.json.decode(allocator, Config, ConfigMapper, json);
+    const decoded = try izo.json.decode(allocator, ConfigMapper, json);
 
     try std.testing.expectEqualStrings(config.name, decoded.name);
     try std.testing.expectEqual(config.port, decoded.port);
