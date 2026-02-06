@@ -8,8 +8,10 @@ const std = @import("std");
 pub const NestedConfig = struct {
     /// Field alias
     alias: ?[]const u8 = null,
-    /// Nested Mapper type
+    /// Nested Mapper type for struct fields
     nested: ?type = null,
+    /// Element Mapper type for array/slice fields
+    element_mapper: ?type = null,
 };
 
 /// Field mapping rules
@@ -65,6 +67,10 @@ pub const FieldMeta = struct {
     has_default_value: bool,
     /// Default value (if exists)
     default_value: DefaultValueUnion,
+    /// Whether an element Mapper exists for arrays/slices
+    has_element_mapper: bool,
+    /// Element Mapper type for arrays/slices (if exists)
+    element_mapper: type,
 };
 
 /// Type mapping metadata - generated at comptime
@@ -132,6 +138,18 @@ fn generateFieldsRecursive(
         else => void,
     };
 
+    // Determine if has element Mapper for arrays
+    const has_element = comptime switch (rule) {
+        .combined => |combined| combined.element_mapper != null,
+        else => false,
+    };
+
+    // Determine element Mapper type
+    const element_type = comptime switch (rule) {
+        .combined => |combined| combined.element_mapper orelse void,
+        else => void,
+    };
+
     const new_field_meta = FieldMeta{
         .name = field.name,
         .serialized_name = serialized_name,
@@ -141,6 +159,8 @@ fn generateFieldsRecursive(
         .nested_mapper = nested_type,
         .has_default_value = false,
         .default_value = .none,
+        .has_element_mapper = has_element,
+        .element_mapper = element_type,
     };
 
     // Recursively process next field
@@ -180,6 +200,8 @@ fn getFieldRule(comptime config: anytype, comptime field_name: []const u8) Field
                 var has_nested: bool = false;
                 var nested_value: ?type = null;
                 var has_default_value: bool = false;
+                var has_element_mapper: bool = false;
+                var element_mapper_value: ?type = null;
 
                 inline for (struct_fields) |struct_field| {
                     if (comptime std.mem.eql(u8, struct_field.name, "alias")) {
@@ -190,27 +212,21 @@ fn getFieldRule(comptime config: anytype, comptime field_name: []const u8) Field
                         nested_value = raw_value.nested;
                     } else if (comptime std.mem.eql(u8, struct_field.name, "default_value")) {
                         has_default_value = true;
+                    } else if (comptime std.mem.eql(u8, struct_field.name, "element_mapper")) {
+                        has_element_mapper = true;
+                        element_mapper_value = raw_value.element_mapper;
                     }
                 }
 
-                // If has alias and nested, return combined rule
-                if (has_alias and has_nested) {
+                // If has any combined properties, return combined rule
+                if (has_alias or has_nested or has_element_mapper) {
                     return FieldRule{
                         .combined = .{
                             .alias = alias_value,
                             .nested = nested_value,
+                            .element_mapper = element_mapper_value,
                         },
                     };
-                }
-
-                // Only alias
-                if (has_alias) {
-                    return FieldRule{ .alias = alias_value.? };
-                }
-
-                // Only nested
-                if (has_nested) {
-                    return FieldRule{ .nested = nested_value.? };
                 }
 
                 // Only default_value

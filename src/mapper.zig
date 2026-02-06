@@ -76,6 +76,9 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
                         const NestedAdapter = comptime getNestedAdapter(field_meta.nested_mapper);
                         const nested_adapter = NestedAdapter{ .value = field_value };
                         try jws.write(nested_adapter);
+                    } else if (comptime field_meta.has_element_mapper) {
+                        // Handle array/slice with element mapper
+                        try writeArrayWithElementMapper(jws, field_value, field_meta.element_mapper);
                     } else {
                         // Otherwise serialize field value directly
                         try jws.write(field_value);
@@ -83,6 +86,18 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
                 }
 
                 try jws.endObject();
+            }
+
+            /// Write array with element mapper applied to each element
+            fn writeArrayWithElementMapper(jws: anytype, array: anytype, comptime ElementMapper: type) !void {
+                const ElementAdapter = ElementMapper.Adapter;
+
+                try jws.beginArray();
+                for (array) |element| {
+                    const element_adapter = ElementAdapter{ .value = element };
+                    try jws.write(element_adapter);
+                }
+                try jws.endArray();
             }
         };
 

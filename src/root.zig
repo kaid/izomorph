@@ -41,6 +41,9 @@ pub const meta = @import("meta.zig");
 /// Error handling module
 pub const errors = @import("error.zig");
 
+/// Buffer pool for performance optimization
+pub const buffer = @import("buffer.zig");
+
 /// Mapper core structure
 pub const Mapper = @import("mapper.zig").Mapper;
 

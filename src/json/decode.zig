@@ -177,8 +177,44 @@ fn createDecoder(comptime T: type, comptime MapperType: type) type {
                 return try NestedDecoder.jsonParse(allocator, source, actual_options);
             }
 
+            // If has element Mapper for arrays/slices
+            if (comptime field_meta.has_element_mapper) {
+                const ElementType = @typeInfo(FieldType).pointer.child;
+                return try parseArrayWithElementMapper(ElementType, allocator, source, field_meta.element_mapper, actual_options);
+            }
+
             // Otherwise use standard parsing
             return try std.json.innerParse(FieldType, allocator, source, actual_options);
+        }
+
+        /// Parse array with element mapper applied to each element
+        fn parseArrayWithElementMapper(
+            comptime ElementType: type,
+            allocator: std.mem.Allocator,
+            source: anytype,
+            comptime ElementMapper: type,
+            options: std.json.ParseOptions,
+        ) ![]const ElementType {
+            const ElementDecoder = createDecoder(ElementType, ElementMapper);
+
+            // Parse array begin
+            if (.array_begin != try source.next()) return error.UnexpectedToken;
+
+            var list: std.ArrayList(ElementType) = .empty;
+            errdefer list.deinit(allocator);
+
+            // Parse elements until array end
+            while (true) {
+                if (try source.peekNextTokenType() == .array_end) {
+                    _ = try source.next();
+                    break;
+                }
+
+                const element = try ElementDecoder.jsonParse(allocator, source, options);
+                try list.append(allocator, element);
+            }
+
+            return list.toOwnedSlice(allocator);
         }
     };
 }
@@ -293,4 +329,74 @@ test "decode - roundtrip encode/decode" {
 
     try std.testing.expectEqualStrings(person.name, decoded.name);
     try std.testing.expectEqual(person.age, decoded.age);
+}
+
+test "decode - array with element mapper" {
+    const allocator = std.testing.allocator;
+
+    const Hobby = struct {
+        name: []const u8,
+        years: u32,
+    };
+
+    const Person = struct {
+        name: []const u8,
+        hobbies: []const Hobby,
+    };
+
+    // Define element mapper for hobbies
+    const HobbyMapper = mapper.Mapper(Hobby, .{
+        .name = .{ .alias = "hobby_name" },
+    });
+
+    const PersonMapper = mapper.Mapper(Person, .{
+        .hobbies = .{ .element_mapper = HobbyMapper },
+    });
+
+    // JSON with aliased hobby names
+    const json_str = "{\"name\":\"Alice\",\"hobbies\":[{\"hobby_name\":\"reading\",\"years\":5},{\"hobby_name\":\"gaming\",\"years\":3}]}";
+    const person = try decode(allocator, Person, PersonMapper, json_str);
+    defer allocator.free(person.hobbies);
+
+    try std.testing.expectEqualStrings("Alice", person.name);
+    try std.testing.expectEqual(@as(usize, 2), person.hobbies.len);
+    try std.testing.expectEqualStrings("reading", person.hobbies[0].name);
+    try std.testing.expectEqual(@as(u32, 5), person.hobbies[0].years);
+    try std.testing.expectEqualStrings("gaming", person.hobbies[1].name);
+    try std.testing.expectEqual(@as(u32, 3), person.hobbies[1].years);
+}
+
+test "encode - array with element mapper" {
+    const allocator = std.testing.allocator;
+
+    const Hobby = struct {
+        name: []const u8,
+        years: u32,
+    };
+
+    const Person = struct {
+        name: []const u8,
+        hobbies: []const Hobby,
+    };
+
+    // Define element mapper for hobbies
+    const HobbyMapper = mapper.Mapper(Hobby, .{
+        .name = .{ .alias = "hobby_name" },
+    });
+
+    const PersonMapper = mapper.Mapper(Person, .{
+        .hobbies = .{ .element_mapper = HobbyMapper },
+    });
+
+    const person = Person{
+        .name = "Bob",
+        .hobbies = &.{ .{ .name = "coding", .years = 10 }, .{ .name = "music", .years = 2 } },
+    };
+
+    const json = try @import("encode.zig").encode(allocator, person, PersonMapper, .{});
+    defer allocator.free(json);
+
+    // Verify output uses hobby_name alias for array elements
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"hobby_name\":\"coding\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"hobby_name\":\"music\"") != null);
 }
