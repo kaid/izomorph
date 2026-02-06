@@ -1,19 +1,19 @@
-//! Izo JSON 解码器 - 基于 std.json 的实现
+//! Izo JSON Decoder - Implementation based on std.json
 //!
-//! 利用 Zig 标准库的成熟 JSON 实现，提供可靠的反序列化功能。
-//! 通过 Mapper 实现字段映射（别名解析、字段跳过等）。
+//! Leverages Zig's mature standard library JSON implementation for reliable deserialization.
+//! Field mapping is achieved through Mapper (alias resolution, field skipping, etc.).
 
 const std = @import("std");
 const meta_module = @import("../meta.zig");
 
-/// JSON 解码错误集
+/// JSON decoding error set
 pub const Error = std.json.ParseError(std.json.Scanner) || error{MissingField};
 
-/// 解码选项
+/// Decoding options
 pub const DecodeOptions = struct {
-    /// 遇到未知字段时的行为
+    /// Behavior when encountering unknown fields
     ignore_unknown_fields: bool = true,
-    /// 遇到重复字段时的行为
+    /// Behavior when encountering duplicate fields
     duplicate_field_behavior: enum {
         use_first,
         @"error",
@@ -21,9 +21,9 @@ pub const DecodeOptions = struct {
     } = .use_last,
 };
 
-/// 将 JSON 字符串解码为指定类型
+/// Decode JSON string to specified type
 ///
-/// 使用示例:
+/// Usage example:
 /// ```zig
 /// const Person = struct { name: []const u8, age: u32 };
 /// const PersonMapper = izo.Mapper(Person, .{ .name = .{ .alias = "person_name" } });
@@ -35,58 +35,58 @@ pub fn decode(
     comptime MapperType: type,
     json_str: []const u8,
 ) Error!T {
-    // 使用 Mapper 创建 Decoder 类型
+    // Create Decoder type using Mapper
     const Decoder = createDecoder(T, MapperType);
 
-    // 使用 std.json 解析
+    // Parse using std.json
     var scanner = std.json.Scanner.initCompleteInput(allocator, json_str);
     defer scanner.deinit();
 
     const options = std.json.ParseOptions{
-        .ignore_unknown_fields = true, // 我们在 jsonParse 中处理字段映射
+        .ignore_unknown_fields = true, // We handle field mapping in jsonParse
         .duplicate_field_behavior = .use_last,
-        .max_value_len = json_str.len, // 设置最大值为输入字符串长度
+        .max_value_len = json_str.len, // Set max value to input string length
     };
 
     return try Decoder.jsonParse(allocator, &scanner, options);
 }
 
-/// 创建解码器类型
+/// Create decoder type
 ///
-/// 为目标类型 T 创建一个实现 jsonParse 方法的解码器类型，
-/// 在解析过程中应用 Mapper 的字段映射规则。
+/// Creates a decoder type implementing jsonParse method for target type T,
+/// applying Mapper's field mapping rules during parsing.
 fn createDecoder(comptime T: type, comptime MapperType: type) type {
     return struct {
-        /// 实现 std.json 的解析接口
+        /// Implements std.json parsing interface
         pub fn jsonParse(
             allocator: std.mem.Allocator,
             source: anytype,
             options: std.json.ParseOptions,
         ) std.json.ParseError(@TypeOf(source.*))!T {
-            // 验证输入是对象开始
+            // Verify input is object begin
             if (.object_begin != try source.next()) return error.UnexpectedToken;
 
-            // 创建结果结构体
+            // Create result struct
             var result: T = undefined;
             var fields_seen = [_]bool{false} ** MapperType.fields.len;
 
-            // 解析对象字段
+            // Parse object fields
             while (true) {
                 var name_token: ?std.json.Token = try source.nextAllocMax(allocator, .alloc_if_needed, options.max_value_len orelse std.json.default_max_value_len);
 
                 const json_field_name = switch (name_token.?) {
                     inline .string, .allocated_string => |slice| slice,
-                    .object_end => break, // 没有更多字段了
+                    .object_end => break, // No more fields
                     else => return error.UnexpectedToken,
                 };
 
-                // 在 Mapper 的字段中查找匹配的序列化名称
+                // Find matching serialized name in Mapper's fields
                 var matched = false;
                 inline for (MapperType.fields, 0..) |field_meta, i| {
                     if (field_meta.should_skip) continue;
 
                     if (std.mem.eql(u8, field_meta.serialized_name, json_field_name)) {
-                        // 释放名称 token
+                        // Free name token
                         if (name_token) |token| {
                             switch (token) {
                                 .allocated_string => |slice| allocator.free(slice),
@@ -95,11 +95,11 @@ fn createDecoder(comptime T: type, comptime MapperType: type) type {
                         }
                         name_token = null;
 
-                        // 处理重复字段
+                        // Handle duplicate fields
                         if (fields_seen[i]) {
                             switch (options.duplicate_field_behavior) {
                                 .use_first => {
-                                    // 解析并忽略重复值
+                                    // Parse and ignore duplicate value
                                     _ = try parseFieldValue(allocator, source, field_meta, options);
                                     matched = true;
                                     break;
@@ -109,7 +109,7 @@ fn createDecoder(comptime T: type, comptime MapperType: type) type {
                             }
                         }
 
-                        // 解析字段值
+                        // Parse field value
                         @field(result, field_meta.name) = try parseFieldValue(allocator, source, field_meta, options);
                         fields_seen[i] = true;
                         matched = true;
@@ -117,7 +117,7 @@ fn createDecoder(comptime T: type, comptime MapperType: type) type {
                     }
                 }
 
-                // 如果没有匹配的字段
+                // If no matching field
                 if (!matched) {
                     if (name_token) |token| {
                         switch (token) {
@@ -134,7 +134,7 @@ fn createDecoder(comptime T: type, comptime MapperType: type) type {
                 }
             }
 
-            // 填充默认值（对于未被解析的字段）
+            // Fill default values (for unparsed fields)
             inline for (MapperType.fields, 0..) |field_meta, i| {
                 if (field_meta.should_skip) continue;
 
@@ -142,18 +142,18 @@ fn createDecoder(comptime T: type, comptime MapperType: type) type {
                     const field_type = @TypeOf(@field(result, field_meta.name));
 
                     if (comptime @typeInfo(field_type) == .optional) {
-                        // 可选类型默认为 null
+                        // Optional types default to null
                         @field(result, field_meta.name) = null;
                     }
-                    // 对于非可选类型且未提供的情况，保持未初始化
-                    // 在实际应用中可能需要更好的错误处理
+                    // For non-optional types without provided values, keep uninitialized
+                    // Better error handling may be needed in production applications
                 }
             }
 
             return result;
         }
 
-        /// 解析单个字段的值
+        /// Parse single field value
         fn parseFieldValue(
             allocator: std.mem.Allocator,
             source: anytype,
@@ -162,7 +162,7 @@ fn createDecoder(comptime T: type, comptime MapperType: type) type {
         ) !@TypeOf(@field(@as(T, undefined), field_meta.name)) {
             const FieldType = @TypeOf(@field(@as(T, undefined), field_meta.name));
 
-            // 确保 options 的 allocate 和 max_value_len 被设置
+            // Ensure options allocate and max_value_len are set
             var actual_options = options;
             if (actual_options.allocate == null) {
                 actual_options.allocate = .alloc_if_needed;
@@ -171,19 +171,19 @@ fn createDecoder(comptime T: type, comptime MapperType: type) type {
                 actual_options.max_value_len = std.json.default_max_value_len;
             }
 
-            // 如果有嵌套 Mapper，使用它创建嵌套解码器
+            // If has nested Mapper, create nested decoder using it
             if (comptime field_meta.has_nested_mapper) {
                 const NestedDecoder = createDecoder(FieldType, field_meta.nested_mapper);
                 return try NestedDecoder.jsonParse(allocator, source, actual_options);
             }
 
-            // 否则使用标准解析
+            // Otherwise use standard parsing
             return try std.json.innerParse(FieldType, allocator, source, actual_options);
         }
     };
 }
 
-// ==================== 测试 ====================
+// ==================== Tests ====================
 
 const mapper = @import("../mapper.zig");
 
@@ -216,7 +216,7 @@ test "decode - struct with alias" {
         .name = .{ .alias = "person_name" },
     });
 
-    // JSON 使用别名
+    // JSON uses alias
     const json_str = "{\"person_name\":\"Bob\",\"age\":25}";
     const person = try decode(allocator, Person, PersonMapper, json_str);
 
@@ -234,7 +234,7 @@ test "decode - ignore unknown fields" {
 
     const PersonMapper = mapper.Mapper(Person, .{});
 
-    // JSON 包含未知字段
+    // JSON contains unknown fields
     const json_str = "{\"name\":\"Charlie\",\"age\":35,\"extra\":\"ignored\"}";
     const person = try decode(allocator, Person, PersonMapper, json_str);
 
@@ -283,12 +283,12 @@ test "decode - roundtrip encode/decode" {
         .name = .{ .alias = "person_name" },
     });
 
-    // 编码
+    // Encode
     const person = Person{ .name = "Eve", .age = 28 };
     const encoded = try @import("encode.zig").encode(allocator, person, PersonMapper, .{});
     defer allocator.free(encoded);
 
-    // 解码
+    // Decode
     const decoded = try decode(allocator, Person, PersonMapper, encoded);
 
     try std.testing.expectEqualStrings(person.name, decoded.name);

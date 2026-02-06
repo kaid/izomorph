@@ -1,13 +1,13 @@
-//! Izo Mapper - 基于 std.json 的类型映射系统
+//! Izo Mapper - Type mapping system based on std.json
 //!
-//! Mapper 为结构体类型生成配置，并通过 Adapter 模式与 std.json 集成。
+//! Mapper generates configuration for struct types and integrates with std.json via Adapter pattern.
 
 const std = @import("std");
 const meta_module = @import("meta.zig");
 
-/// Mapper 配置类型
+/// Mapper configuration type
 ///
-/// 使用示例:
+/// Usage example:
 /// ```zig
 /// const Person = struct {
 ///     name: []const u8,
@@ -21,63 +21,63 @@ const meta_module = @import("meta.zig");
 /// });
 /// ```
 pub fn Mapper(comptime T: type, comptime config: anytype) type {
-    // 验证配置类型
+    // Validate config type
     const ConfigType = @TypeOf(config);
     const config_info = @typeInfo(ConfigType);
     if (config_info != .@"struct") {
         @compileError("Mapper config must be a struct literal, got " ++ @typeName(ConfigType));
     }
 
-    // 验证 T 是结构体
+    // Verify T is a struct
     const type_info = @typeInfo(T);
     if (type_info != .@"struct") {
         @compileError("Mapper requires a struct type, got " ++ @typeName(T));
     }
 
-    // 在 comptime 生成字段元数据
+    // Generate field metadata at comptime
     const fields_meta = comptime meta_module.generateFieldMeta(T, config);
 
     return struct {
-        /// 映射的目标类型
+        /// Target type for mapping
         pub const TargetType = T;
 
-        /// 预计算的字段元数据数组
+        /// Precomputed field metadata array
         pub const fields: []const meta_module.FieldMeta = fields_meta;
 
-        /// 创建适配器，用于与 std.json 集成
+        /// Create adapter for std.json integration
         ///
-        /// 适配器包装原始值并实现 jsonStringify 方法
+        /// Adapter wraps the original value and implements jsonStringify method
         pub fn adapter(value: T) Adapter {
             return Adapter{ .value = value };
         }
 
-        /// 适配器类型 - 实现 std.json 的 jsonStringify 接口
+        /// Adapter type - implements std.json jsonStringify interface
         pub const Adapter = struct {
             value: T,
 
-            /// 实现 std.json 的序列化接口
+            /// Implements std.json serialization interface
             ///
-            /// 此方法会被 std.json.stringify 自动调用
+            /// This method is automatically called by std.json.stringify
             pub fn jsonStringify(self: @This(), jws: anytype) !void {
                 try jws.beginObject();
 
-                // 遍历所有字段
+                // Iterate over all fields
                 inline for (fields) |field_meta| {
                     if (field_meta.should_skip) continue;
 
-                    // 使用映射后的字段名
+                    // Use mapped field name
                     try jws.objectField(field_meta.serialized_name);
 
-                    // 获取字段值
+                    // Get field value
                     const field_value = @field(self.value, field_meta.name);
 
-                    // 如果有嵌套 Mapper，使用它的 Adapter 包装字段值
+                    // If has nested Mapper, use its Adapter to wrap field value
                     if (comptime field_meta.has_nested_mapper) {
                         const NestedAdapter = comptime getNestedAdapter(field_meta.nested_mapper);
                         const nested_adapter = NestedAdapter{ .value = field_value };
                         try jws.write(nested_adapter);
                     } else {
-                        // 否则直接序列化字段值
+                        // Otherwise serialize field value directly
                         try jws.write(field_value);
                     }
                 }
@@ -86,16 +86,16 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
             }
         };
 
-        /// 获取嵌套 Mapper 的 Adapter 类型
+        /// Get Adapter type for nested Mapper
         fn getNestedAdapter(comptime NestedMapper: type) type {
-            // 验证这是一个有效的 Mapper 类型
+            // Verify it's a valid Mapper type
             if (!@hasDecl(NestedMapper, "Adapter")) {
                 @compileError("Nested mapper must have an Adapter type");
             }
             return NestedMapper.Adapter;
         }
 
-        /// 获取字段的序列化名称
+        /// Get serialized name for a field
         pub fn getSerializedName(comptime field_name: []const u8) []const u8 {
             inline for (fields) |field| {
                 if (comptime std.mem.eql(u8, field.name, field_name)) {
@@ -105,7 +105,7 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
             @compileError("Field '" ++ field_name ++ "' not found in " ++ @typeName(T));
         }
 
-        /// 检查字段是否应该被跳过
+        /// Check if field should be skipped
         pub fn shouldSkipField(comptime field_name: []const u8) bool {
             inline for (fields) |field| {
                 if (comptime std.mem.eql(u8, field.name, field_name)) {
@@ -115,7 +115,7 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
             @compileError("Field '" ++ field_name ++ "' not found in " ++ @typeName(T));
         }
 
-        /// 获取所有非跳过的字段数量（comptime 计算）
+        /// Get count of non-skipped fields (computed at comptime)
         pub fn getActiveFieldCount() usize {
             return comptime blk: {
                 var count: usize = 0;
@@ -126,8 +126,8 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
             };
         }
 
-        /// 通过序列化名称查找字段元数据
-        /// 用于反序列化时的字段匹配
+        /// Find field metadata by serialized name
+        /// Used for field matching during deserialization
         pub fn findFieldBySerializedName(serialized_name: []const u8) ?meta_module.FieldMeta {
             inline for (fields) |field| {
                 if (field.should_skip) continue;
@@ -140,7 +140,7 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
     };
 }
 
-// ==================== 测试 ====================
+// ==================== Tests ====================
 
 test "Mapper - basic usage" {
     const Person = struct {
@@ -220,17 +220,17 @@ test "Mapper - adapter jsonStringify" {
 
     const adapter = PersonMapper.adapter(person);
 
-    // 使用 std.json.Stringify.valueAlloc 测试适配器
+    // Test adapter using std.json.Stringify.valueAlloc
     const allocator = std.testing.allocator;
     const json = try std.json.Stringify.valueAlloc(allocator, adapter, .{});
     defer allocator.free(json);
 
-    // 验证 JSON 包含别名
+    // Verify JSON contains alias
     try std.testing.expect(std.mem.indexOf(u8, json, "\"person_name\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"Alice\"") != null);
 }
 
-// ==================== 嵌套 Mapper 测试 ====================
+// ==================== Nested Mapper Tests ====================
 
 test "Mapper - nested struct with mapping" {
     const Address = struct {
@@ -244,13 +244,13 @@ test "Mapper - nested struct with mapping" {
         address: Address,
     };
 
-    // 为嵌套结构体定义 Mapper
+    // Define Mapper for nested struct
     const AddressMapper = Mapper(Address, .{
         .password = .skip,
         .street = .{ .alias = "road" },
     });
 
-    // 为主结构体定义 Mapper，引用嵌套 Mapper
+    // Define Mapper for main struct, referencing nested Mapper
     const PersonMapper = Mapper(Person, .{
         .name = .{ .alias = "person_name" },
         .address = .{ .nested = AddressMapper },
@@ -270,15 +270,15 @@ test "Mapper - nested struct with mapping" {
     const json = try std.json.Stringify.valueAlloc(allocator, adapter, .{});
     defer allocator.free(json);
 
-    // 验证外层别名
+    // Verify outer alias
     try std.testing.expect(std.mem.indexOf(u8, json, "\"person_name\"") != null);
-    // 验证嵌套结构体的字段映射
+    // Verify nested struct field mapping
     try std.testing.expect(std.mem.indexOf(u8, json, "\"road\"") != null); // street -> road
     try std.testing.expect(std.mem.indexOf(u8, json, "\"street\"") == null);
-    // 验证嵌套结构体的跳过
+    // Verify nested struct skip
     try std.testing.expect(std.mem.indexOf(u8, json, "password") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "secret123") == null);
-    // 验证未修改的字段
+    // Verify unchanged fields
     try std.testing.expect(std.mem.indexOf(u8, json, "\"city\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"New York\"") != null);
 }
@@ -300,9 +300,9 @@ test "Mapper - deeply nested with multiple mappers" {
         address: Address,
     };
 
-    // 为每个嵌套层级定义 Mapper
-    // 注意：HobbyMapper 定义了但尚未应用于数组元素
-    // 数组元素映射将在后续版本支持
+    // Define Mappers for each nesting level
+    // Note: HobbyMapper is defined but not yet applied to array elements
+    // Array element mapping will be supported in future versions
     _ = Mapper(Hobby, .{
         .secret_note = .skip,
         .years = .{ .alias = "experience_years" },
@@ -332,10 +332,10 @@ test "Mapper - deeply nested with multiple mappers" {
     const json = try std.json.Stringify.valueAlloc(allocator, adapter, .{});
     defer allocator.free(json);
 
-    // 验证外层映射
+    // Verify outer mapping
     try std.testing.expect(std.mem.indexOf(u8, json, "\"full_name\"") != null);
-    // 验证第一层嵌套映射
+    // Verify first level nested mapping
     try std.testing.expect(std.mem.indexOf(u8, json, "\"road\"") != null);
-    // 注意：hobbies 数组内的结构体还没有应用 HobbyMapper
-    // 这需要更复杂的数组元素映射，将在后续版本支持
+    // Note: Hobbies array inner structs don't have HobbyMapper applied yet
+    // This requires more complex array element mapping, will be supported in future versions
 }

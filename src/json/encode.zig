@@ -1,23 +1,23 @@
-//! Izo JSON 编码器 - 基于 std.json 的实现
+//! Izo JSON Encoder - Implementation based on std.json
 //!
-//! 利用 Zig 标准库的成熟 JSON 实现，提供可靠的序列化功能。
-//! 通过 Mapper 生成的 Adapter 实现字段映射。
+//! Leverages Zig's mature standard library JSON implementation for reliable serialization.
+//! Field mapping is achieved through Mapper-generated Adapters.
 
 const std = @import("std");
 
-/// JSON 编码错误集
+/// JSON encoding error set
 pub const Error = std.json.Stringify.Error || std.mem.Allocator.Error;
 
-/// 编码选项
+/// Encoding options
 ///
-/// 包装 std.json.Stringify.Options 并添加 Izo 特定的选项
+/// Wraps std.json.Stringify.Options and adds Izo-specific options
 pub const EncodeOptions = struct {
-    /// 是否美化输出
+    /// Enable pretty printing
     pretty: bool = false,
-    /// 缩进字符数（pretty=true 时有效）
+    /// Indent size (effective when pretty=true)
     indent_size: u8 = 2,
 
-    /// 转换为 std.json 选项
+    /// Convert to std.json options
     pub fn toStdOptions(self: EncodeOptions) std.json.Stringify.Options {
         return .{
             .whitespace = if (self.pretty) .indent_2 else .minified,
@@ -25,9 +25,9 @@ pub const EncodeOptions = struct {
     }
 };
 
-/// 将值编码为 JSON 字符串
+/// Encode a value to JSON string
 ///
-/// 使用示例:
+/// Usage example:
 /// ```zig
 /// const Person = struct { name: []const u8, age: u32 };
 /// const PersonMapper = izo.Mapper(Person, .{ .name = .{ .alias = "person_name" } });
@@ -40,31 +40,31 @@ pub fn encode(
     comptime MapperType: type,
     options: EncodeOptions,
 ) Error![]const u8 {
-    // 使用 Mapper 生成适配器
+    // Use Mapper to generate adapter
     const adapter = MapperType.adapter(value);
 
-    // 使用 std.json.Stringify 进行序列化
+    // Serialize using std.json.Stringify
     return try std.json.Stringify.valueAlloc(allocator, adapter, options.toStdOptions());
 }
 
-// ==================== 测试 ====================
+// ==================== Tests ====================
 
 const mapper = @import("../mapper.zig");
 
 test "encode - basic types" {
     const allocator = std.testing.allocator;
 
-    // 整数
+    // Integer
     const int_result = try std.json.Stringify.valueAlloc(allocator, @as(i32, 42), .{});
     defer allocator.free(int_result);
     try std.testing.expectEqualStrings("42", int_result);
 
-    // 浮点数
+    // Float
     const float_result = try std.json.Stringify.valueAlloc(allocator, @as(f64, 3.14), .{});
     defer allocator.free(float_result);
     try std.testing.expectEqualStrings("3.14", float_result);
 
-    // 布尔值
+    // Boolean
     const bool_true = try std.json.Stringify.valueAlloc(allocator, true, .{});
     defer allocator.free(bool_true);
     try std.testing.expectEqualStrings("true", bool_true);
@@ -100,7 +100,7 @@ test "encode - simple struct" {
     const result = try encode(allocator, person, PersonMapper, .{});
     defer allocator.free(result);
 
-    // 验证完整 JSON 输出
+    // Verify complete JSON output
     try std.testing.expectEqualStrings("{\"name\":\"Alice\",\"age\":30}", result);
 }
 
@@ -124,7 +124,7 @@ test "encode - struct with alias" {
     const result = try encode(allocator, person, PersonMapper, .{});
     defer allocator.free(result);
 
-    // 验证完整 JSON 输出：name 被映射为 person_name
+    // Verify complete JSON output: name mapped to person_name
     try std.testing.expectEqualStrings("{\"person_name\":\"Bob\",\"age\":25}", result);
 }
 
@@ -148,7 +148,7 @@ test "encode - struct with skip" {
     const result = try encode(allocator, person, PersonMapper, .{});
     defer allocator.free(result);
 
-    // 验证完整 JSON 输出：secret 字段被跳过
+    // Verify complete JSON output: secret field skipped
     try std.testing.expectEqualStrings("{\"name\":\"Charlie\"}", result);
 }
 
@@ -194,13 +194,8 @@ test "encode - with pretty printing" {
     const result = try encode(allocator, person, PersonMapper, .{ .pretty = true });
     defer allocator.free(result);
 
-    // 验证美化输出的格式
-    const expected =
-        \\{
-        \\  "name": "Alice",
-        \\  "age": 30
-        \\}
-    ;
+    // Verify pretty print format
+    const expected = "{\n  \"name\": \"Alice\",\n  \"age\": 30\n}";
     try std.testing.expectEqualStrings(expected, result);
 }
 
@@ -218,7 +213,7 @@ test "encode - nested struct with mapping" {
         address: Address,
     };
 
-    // 为嵌套结构体定义 Mapper
+    // Define Mapper for nested struct
     const AddressMapper = mapper.Mapper(Address, .{
         .street = .{ .alias = "road" },
         .zip = .skip,
@@ -241,7 +236,7 @@ test "encode - nested struct with mapping" {
     const result = try encode(allocator, person, PersonMapper, .{});
     defer allocator.free(result);
 
-    // 验证完整 JSON 输出
+    // Verify complete JSON output
     try std.testing.expectEqualStrings("{\"full_name\":\"Alice\",\"address\":{\"road\":\"123 Main St\",\"city\":\"New York\"}}", result);
 }
 
@@ -265,7 +260,7 @@ test "encode - struct with array" {
     const result = try encode(allocator, person, PersonMapper, .{});
     defer allocator.free(result);
 
-    // 验证完整 JSON 输出
+    // Verify complete JSON output
     try std.testing.expectEqualStrings("{\"name\":\"Bob\",\"interests\":[\"reading\",\"gaming\",\"coding\"]}", result);
 }
 
@@ -305,7 +300,7 @@ test "encode - deeply nested structure" {
     const result = try encode(allocator, person, PersonMapper, .{});
     defer allocator.free(result);
 
-    // 验证完整 JSON 输出
+    // Verify complete JSON output
     try std.testing.expectEqualStrings("{\"person_name\":\"Charlie\",\"address\":{\"street\":\"789 Pine Rd\",\"hobbies\":[{\"name\":\"reading\",\"years\":5},{\"name\":\"gaming\",\"years\":3}]}}", result);
 }
 
@@ -324,7 +319,7 @@ test "encode - struct with skip in nested" {
         secret: []const u8,
     };
 
-    // 为嵌套结构体定义 Mapper，跳过 password 字段
+    // Define Mapper for nested struct, skip password field
     const AddressMapper = mapper.Mapper(Address, .{
         .password = .skip,
     });
@@ -347,7 +342,7 @@ test "encode - struct with skip in nested" {
     const result = try encode(allocator, person, PersonMapper, .{});
     defer allocator.free(result);
 
-    // 验证完整 JSON 输出
+    // Verify complete JSON output
     try std.testing.expectEqualStrings("{\"name\":\"Dave\",\"location\":{\"street\":\"456 Oak Ave\",\"city\":\"Boston\"}}", result);
 }
 
@@ -374,6 +369,6 @@ test "encode - multiple aliases" {
     const result = try encode(allocator, person, PersonMapper, .{});
     defer allocator.free(result);
 
-    // 验证完整 JSON 输出
+    // Verify complete JSON output
     try std.testing.expectEqualStrings("{\"firstName\":\"John\",\"lastName\":\"Doe\",\"age\":35}", result);
 }

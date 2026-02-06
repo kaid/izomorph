@@ -1,71 +1,71 @@
-//! Izo 元数据类型系统
+//! Izo Metadata Type System
 //!
-//! 定义字段映射规则和元数据结构，用于 comptime 代码生成
+//! Defines field mapping rules and metadata structures for comptime code generation
 
 const std = @import("std");
 
-/// 嵌套配置 - 同时支持别名和嵌套 Mapper
+/// Nested configuration - supports both alias and nested Mapper simultaneously
 pub const NestedConfig = struct {
-    /// 字段别名
+    /// Field alias
     alias: ?[]const u8 = null,
-    /// 嵌套 Mapper 类型
+    /// Nested Mapper type
     nested: ?type = null,
 };
 
-/// 字段映射规则
+/// Field mapping rules
 pub const FieldRule = union(enum) {
-    /// 使用字段原名（默认行为）
+    /// Use original field name (default behavior)
     default,
-    /// 使用别名进行序列化/反序列化
+    /// Use alias for serialization/deserialization
     alias: []const u8,
-    /// 完全跳过该字段
+    /// Completely skip this field
     skip,
-    /// 反序列化时缺失的默认值
+    /// Default value when missing during deserialization
     default_value: DefaultValue,
-    /// 使用嵌套 Mapper（用于结构体字段）
+    /// Use nested Mapper (for struct fields)
     nested: type,
-    /// 组合配置：别名 + 嵌套 Mapper
+    /// Combined configuration: alias + nested Mapper
     combined: NestedConfig,
 
-    /// 默认值包装器 - 需要在 comptime 存储任意类型的默认值
+    /// Default value wrapper - stores arbitrary default values at comptime
     pub const DefaultValue = struct {
-        // 使用类型擦除存储默认值
-        // 实际值通过 comptime 类型信息重建
+        // Use type erasure to store default values
+        // Actual values are reconstructed from comptime type information
         _type_id: usize = 0,
     };
 };
 
-/// 字段元数据 - comptime 生成
+/// Field metadata - generated at comptime
 ///
-/// 包含字段在序列化/反序列化时所需的所有信息
+/// Contains all information needed for serialization/deserialization
 pub const FieldMeta = struct {
-    /// Zig 字段名
+    /// Zig field name
     name: []const u8,
-    /// JSON/Protobuf 中的字段名（考虑 alias）
+    /// JSON/Protobuf field name (considering alias)
     serialized_name: []const u8,
-    /// 是否应该跳过此字段
+    /// Whether this field should be skipped
     should_skip: bool,
-    /// 字段在结构体中的索引
+    /// Field index in the struct
     index: usize,
-    /// 是否有嵌套 Mapper
+    /// Whether a nested Mapper exists
     has_nested_mapper: bool,
-    /// 嵌套 Mapper 类型（如果有）
+    /// Nested Mapper type (if exists)
     nested_mapper: type,
 };
 
-/// 类型映射元数据 - comptime 生成
+/// Type mapping metadata - generated at comptime
 ///
-/// 包含一个结构体类型的所有字段映射信息
+/// Contains all field mapping information for a struct type
 pub const TypeMeta = struct {
-    /// 字段元数据数组
+    /// Field metadata array
     fields: []const FieldMeta,
-    // 注意: Zig 不支持在 comptime 结构体中存储 type
+    // Note: Zig doesn't support storing type in comptime structs
     // _type: type,
 };
 
-/// 从结构体类型 comptime 生成字段元数据
+/// Generate field metadata from struct type at comptime
 ///
-/// 示例:
+/// Example:
 /// ```zig
 /// const MyStruct = struct { name: []const u8, age: u32 };
 /// const fields = comptime generateFieldMeta(MyStruct, .{
@@ -73,7 +73,7 @@ pub const TypeMeta = struct {
 /// });
 /// ```
 pub fn generateFieldMeta(comptime T: type, comptime config: anytype) []const FieldMeta {
-    // 验证 T 是结构体类型
+    // Verify T is a struct type
     const type_info = @typeInfo(T);
     if (type_info != .@"struct") {
         @compileError("generateFieldMeta requires a struct type, got " ++ @typeName(T));
@@ -81,19 +81,19 @@ pub fn generateFieldMeta(comptime T: type, comptime config: anytype) []const Fie
 
     const struct_info = type_info.@"struct";
 
-    // 使用递归 comptime 函数构建字段元数据数组
-    // 这样可以避免 comptime var 的生命周期问题
+    // Use recursive comptime function to build field metadata array
+    // This avoids comptime var lifetime issues
     return comptime generateFieldsRecursive(struct_info.fields, config, 0, &[_]FieldMeta{});
 }
 
-/// 递归构建字段元数据数组
+/// Recursively build field metadata array
 fn generateFieldsRecursive(
     comptime all_fields: anytype,
     comptime config: anytype,
     comptime index: usize,
     comptime accumulated: []const FieldMeta,
 ) []const FieldMeta {
-    // 基本情况：所有字段处理完毕
+    // Base case: all fields processed
     if (index >= all_fields.len) {
         return accumulated;
     }
@@ -101,17 +101,17 @@ fn generateFieldsRecursive(
     const field = all_fields[index];
     const rule = getFieldRule(config, field.name);
 
-    // 确定序列化名称
+    // Determine serialized name
     const serialized_name = comptime getSerializedName(field.name, rule);
 
-    // 确定是否有嵌套 Mapper
+    // Determine if has nested Mapper
     const has_nested = comptime switch (rule) {
         .nested => true,
         .combined => |combined| combined.nested != null,
         else => false,
     };
 
-    // 确定嵌套 Mapper 类型
+    // Determine nested Mapper type
     const nested_type = comptime switch (rule) {
         .nested => |n| n,
         .combined => |combined| combined.nested orelse void,
@@ -127,38 +127,38 @@ fn generateFieldsRecursive(
         .nested_mapper = nested_type,
     };
 
-    // 递归处理下一个字段
+    // Recursively process next field
     const new_accumulated = accumulated ++ [_]FieldMeta{new_field_meta};
     return generateFieldsRecursive(all_fields, config, index + 1, new_accumulated);
 }
 
-/// 从配置中获取指定字段的规则
+/// Get the rule for a specific field from config
 fn getFieldRule(comptime config: anytype, comptime field_name: []const u8) FieldRule {
     const ConfigType = @TypeOf(config);
     const config_info = @typeInfo(ConfigType);
 
-    // 验证 config 是结构体类型
+    // Verify config is a struct type
     if (config_info != .@"struct") {
         @compileError("Mapper config must be a struct literal");
     }
 
-    // 遍历配置字段，查找匹配的字段名
+    // Iterate over config fields to find matching field name
     inline for (config_info.@"struct".fields) |field| {
         if (comptime std.mem.eql(u8, field.name, field_name)) {
             const raw_value = @field(config, field.name);
             const raw_type = @TypeOf(raw_value);
 
-            // 检查是否直接是 FieldRule 类型（如 .skip, .default, .nested(...)）
+            // Check if it's directly a FieldRule type (e.g., .skip, .default, .nested(...))
             if (raw_type == FieldRule) {
                 return raw_value;
             }
 
-            // 检查是否是匿名结构体字面量
+            // Check if it's an anonymous struct literal
             const raw_type_info = @typeInfo(raw_type);
             if (raw_type_info == .@"struct") {
                 const struct_fields = raw_type_info.@"struct".fields;
 
-                // 收集所有配置项
+                // Collect all configuration items
                 var has_alias: bool = false;
                 var alias_value: ?[]const u8 = null;
                 var has_nested: bool = false;
@@ -177,7 +177,7 @@ fn getFieldRule(comptime config: anytype, comptime field_name: []const u8) Field
                     }
                 }
 
-                // 如果有 alias 和 nested，返回组合规则
+                // If has alias and nested, return combined rule
                 if (has_alias and has_nested) {
                     return FieldRule{
                         .combined = .{
@@ -187,23 +187,23 @@ fn getFieldRule(comptime config: anytype, comptime field_name: []const u8) Field
                     };
                 }
 
-                // 只有 alias
+                // Only alias
                 if (has_alias) {
                     return FieldRule{ .alias = alias_value.? };
                 }
 
-                // 只有 nested
+                // Only nested
                 if (has_nested) {
                     return FieldRule{ .nested = nested_value.? };
                 }
 
-                // 只有 default_value
+                // Only default_value
                 if (has_default_value) {
                     return FieldRule{ .default_value = .{} };
                 }
             }
 
-            // 检查是否是 enum 字面量（如 .skip, .default）
+            // Check if it's an enum literal (e.g., .skip, .default)
             if (raw_type_info == .enum_literal) {
                 const literal_name = @tagName(raw_value);
 
@@ -221,7 +221,7 @@ fn getFieldRule(comptime config: anytype, comptime field_name: []const u8) Field
     return .default;
 }
 
-/// 根据规则获取序列化名称
+/// Get serialized name based on rule
 fn getSerializedName(comptime field_name: []const u8, comptime rule: FieldRule) []const u8 {
     return switch (rule) {
         .alias => |alias| alias,
@@ -230,7 +230,7 @@ fn getSerializedName(comptime field_name: []const u8, comptime rule: FieldRule) 
     };
 }
 
-/// 检查类型是否需要递归处理（结构体或数组）
+/// Check if type needs recursive processing (struct or array)
 pub fn isComplexType(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .@"struct" => true,
@@ -240,7 +240,7 @@ pub fn isComplexType(comptime T: type) bool {
     };
 }
 
-// ==================== 测试 ====================
+// ==================== Tests ====================
 
 test "FieldRule - basic rules" {
     const rule1: FieldRule = .default;
@@ -302,5 +302,5 @@ test "isComplexType" {
     try std.testing.expect(isComplexType([]const u8));
     try std.testing.expect(isComplexType([10]u8));
     try std.testing.expect(!isComplexType(i32));
-    // Note: 最后一个测试与第二个相同，跳过
+    // Note: Last test is same as second, skipped
 }
