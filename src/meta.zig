@@ -35,6 +35,16 @@ pub const FieldRule = union(enum) {
     };
 };
 
+/// Union for storing comptime-known default values
+pub const DefaultValueUnion = union(enum) {
+    none,
+    int: i64,
+    uint: u64,
+    float: f64,
+    bool: bool,
+    string: []const u8,
+};
+
 /// Field metadata - generated at comptime
 ///
 /// Contains all information needed for serialization/deserialization
@@ -51,6 +61,10 @@ pub const FieldMeta = struct {
     has_nested_mapper: bool,
     /// Nested Mapper type (if exists)
     nested_mapper: type,
+    /// Whether has default value
+    has_default_value: bool,
+    /// Default value (if exists)
+    default_value: DefaultValueUnion,
 };
 
 /// Type mapping metadata - generated at comptime
@@ -125,6 +139,8 @@ fn generateFieldsRecursive(
         .index = index,
         .has_nested_mapper = has_nested,
         .nested_mapper = nested_type,
+        .has_default_value = false,
+        .default_value = .none,
     };
 
     // Recursively process next field

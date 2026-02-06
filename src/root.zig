@@ -38,6 +38,9 @@ const std = @import("std");
 /// Type metadata system
 pub const meta = @import("meta.zig");
 
+/// Error handling module
+pub const errors = @import("error.zig");
+
 /// Mapper core structure
 pub const Mapper = @import("mapper.zig").Mapper;
 
