@@ -40,11 +40,8 @@ pub fn encode(
     comptime MapperType: type,
     options: EncodeOptions,
 ) Error![]const u8 {
-    // Use Mapper to generate adapter
-    const adapter = MapperType.adapter(value);
-
-    // Serialize using std.json.Stringify
-    return try std.json.Stringify.valueAlloc(allocator, adapter, options.toStdOptions());
+    // Use the adapter module for encoding
+    return try @import("adapter.zig").encodeWithMapper(allocator, value, MapperType, options.toStdOptions());
 }
 
 // ==================== Tests ====================

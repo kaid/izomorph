@@ -4,6 +4,16 @@
 
 const std = @import("std");
 
+/// Union serialization strategy
+pub const UnionStrategy = union(enum) {
+    /// Bare/Scalar mode - output the value directly without wrapping
+    /// Used for: RequestId, ProgressToken (string | number)
+    bare,
+    /// Discriminated union mode - output with a type field
+    /// Format: { "type": "variant_name", ...fields }
+    discriminated: []const u8,
+};
+
 /// Nested configuration - supports both alias and nested Mapper simultaneously
 pub const NestedConfig = struct {
     /// Field alias
@@ -12,6 +22,12 @@ pub const NestedConfig = struct {
     nested: ?type = null,
     /// Element Mapper type for array/slice fields
     element_mapper: ?type = null,
+    /// Whether to omit null optional fields during serialization
+    omit_null: bool = false,
+    /// Whether to omit fields that equal their default value during serialization
+    omit_default: bool = false,
+    /// Union serialization strategy
+    union_strategy: ?UnionStrategy = null,
 };
 
 /// Field mapping rules
@@ -71,6 +87,10 @@ pub const FieldMeta = struct {
     has_element_mapper: bool,
     /// Element Mapper type for arrays/slices (if exists)
     element_mapper: type,
+    /// Whether to omit null optional fields during serialization
+    omit_null: bool,
+    /// Whether to omit fields that equal their default value during serialization
+    omit_default: bool,
 };
 
 /// Type mapping metadata - generated at comptime
@@ -150,6 +170,18 @@ fn generateFieldsRecursive(
         else => void,
     };
 
+    // Determine omit_null configuration
+    const omit_null = comptime switch (rule) {
+        .combined => |combined| combined.omit_null,
+        else => false,
+    };
+
+    // Determine omit_default configuration
+    const omit_default = comptime switch (rule) {
+        .combined => |combined| combined.omit_default,
+        else => false,
+    };
+
     const new_field_meta = FieldMeta{
         .name = field.name,
         .serialized_name = serialized_name,
@@ -161,6 +193,8 @@ fn generateFieldsRecursive(
         .default_value = .none,
         .has_element_mapper = has_element,
         .element_mapper = element_type,
+        .omit_null = omit_null,
+        .omit_default = omit_default,
     };
 
     // Recursively process next field
@@ -202,6 +236,8 @@ fn getFieldRule(comptime config: anytype, comptime field_name: []const u8) Field
                 var has_default_value: bool = false;
                 var has_element_mapper: bool = false;
                 var element_mapper_value: ?type = null;
+                var omit_null_value: bool = false;
+                var omit_default_value: bool = false;
 
                 inline for (struct_fields) |struct_field| {
                     if (comptime std.mem.eql(u8, struct_field.name, "alias")) {
@@ -215,16 +251,22 @@ fn getFieldRule(comptime config: anytype, comptime field_name: []const u8) Field
                     } else if (comptime std.mem.eql(u8, struct_field.name, "element_mapper")) {
                         has_element_mapper = true;
                         element_mapper_value = raw_value.element_mapper;
+                    } else if (comptime std.mem.eql(u8, struct_field.name, "omit_null")) {
+                        omit_null_value = raw_value.omit_null;
+                    } else if (comptime std.mem.eql(u8, struct_field.name, "omit_default")) {
+                        omit_default_value = raw_value.omit_default;
                     }
                 }
 
                 // If has any combined properties, return combined rule
-                if (has_alias or has_nested or has_element_mapper) {
+                if (has_alias or has_nested or has_element_mapper or omit_null_value or omit_default_value) {
                     return FieldRule{
                         .combined = .{
                             .alias = alias_value,
                             .nested = nested_value,
                             .element_mapper = element_mapper_value,
+                            .omit_null = omit_null_value,
+                            .omit_default = omit_default_value,
                         },
                     };
                 }

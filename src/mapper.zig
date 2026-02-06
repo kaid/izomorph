@@ -1,6 +1,7 @@
-//! Izo Mapper - Type mapping system based on std.json
+//! Izo Mapper - Type mapping system
 //!
-//! Mapper generates configuration for struct types and integrates with std.json via Adapter pattern.
+//! Mapper generates configuration for struct types.
+//! This module is format-agnostic - serialization implementations are in format-specific modules.
 
 const std = @import("std");
 const meta_module = @import("meta.zig");
@@ -28,10 +29,17 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
         @compileError("Mapper config must be a struct literal, got " ++ @typeName(ConfigType));
     }
 
-    // Verify T is a struct
+    // Detect type kind and dispatch to appropriate mapper
     const type_info = @typeInfo(T);
+
+    // Handle Union types
+    if (type_info == .@"union") {
+        return UnionMapper(T, config);
+    }
+
+    // Verify T is a struct (original behavior)
     if (type_info != .@"struct") {
-        @compileError("Mapper requires a struct type, got " ++ @typeName(T));
+        @compileError("Mapper requires a struct or union type, got " ++ @typeName(T));
     }
 
     // Generate field metadata at comptime
@@ -43,72 +51,6 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
 
         /// Precomputed field metadata array
         pub const fields: []const meta_module.FieldMeta = fields_meta;
-
-        /// Create adapter for std.json integration
-        ///
-        /// Adapter wraps the original value and implements jsonStringify method
-        pub fn adapter(value: T) Adapter {
-            return Adapter{ .value = value };
-        }
-
-        /// Adapter type - implements std.json jsonStringify interface
-        pub const Adapter = struct {
-            value: T,
-
-            /// Implements std.json serialization interface
-            ///
-            /// This method is automatically called by std.json.stringify
-            pub fn jsonStringify(self: @This(), jws: anytype) !void {
-                try jws.beginObject();
-
-                // Iterate over all fields
-                inline for (fields) |field_meta| {
-                    if (field_meta.should_skip) continue;
-
-                    // Use mapped field name
-                    try jws.objectField(field_meta.serialized_name);
-
-                    // Get field value
-                    const field_value = @field(self.value, field_meta.name);
-
-                    // If has nested Mapper, use its Adapter to wrap field value
-                    if (comptime field_meta.has_nested_mapper) {
-                        const NestedAdapter = comptime getNestedAdapter(field_meta.nested_mapper);
-                        const nested_adapter = NestedAdapter{ .value = field_value };
-                        try jws.write(nested_adapter);
-                    } else if (comptime field_meta.has_element_mapper) {
-                        // Handle array/slice with element mapper
-                        try writeArrayWithElementMapper(jws, field_value, field_meta.element_mapper);
-                    } else {
-                        // Otherwise serialize field value directly
-                        try jws.write(field_value);
-                    }
-                }
-
-                try jws.endObject();
-            }
-
-            /// Write array with element mapper applied to each element
-            fn writeArrayWithElementMapper(jws: anytype, array: anytype, comptime ElementMapper: type) !void {
-                const ElementAdapter = ElementMapper.Adapter;
-
-                try jws.beginArray();
-                for (array) |element| {
-                    const element_adapter = ElementAdapter{ .value = element };
-                    try jws.write(element_adapter);
-                }
-                try jws.endArray();
-            }
-        };
-
-        /// Get Adapter type for nested Mapper
-        fn getNestedAdapter(comptime NestedMapper: type) type {
-            // Verify it's a valid Mapper type
-            if (!@hasDecl(NestedMapper, "Adapter")) {
-                @compileError("Nested mapper must have an Adapter type");
-            }
-            return NestedMapper.Adapter;
-        }
 
         /// Get serialized name for a field
         pub fn getSerializedName(comptime field_name: []const u8) []const u8 {
@@ -153,6 +95,91 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
             return null;
         }
     };
+}
+
+// ==================== Union Mapper ====================
+
+/// Create a Mapper for Union types with special serialization strategies
+/// Create a Mapper for Union types
+fn UnionMapper(comptime T: type, comptime config: anytype) type {
+    // Extract union strategy from config
+    const strategy = comptime getUnionStrategy(config);
+
+    return struct {
+        pub const TargetType = T;
+
+        /// Union serialization strategy
+        pub const union_strategy = strategy;
+    };
+}
+
+/// Extract union strategy from config
+fn getUnionStrategy(comptime config: anytype) meta_module.UnionStrategy {
+    const config_info = @typeInfo(@TypeOf(config));
+    if (config_info != .@"struct") return .bare;
+
+    inline for (config_info.@"struct".fields) |field| {
+        if (comptime std.mem.eql(u8, field.name, "union_strategy")) {
+            const strategy = @field(config, "union_strategy");
+            const strategy_type = @TypeOf(strategy);
+            const strategy_info = @typeInfo(strategy_type);
+
+            // Check if it's a UnionStrategy type (union(enum))
+            if (strategy_info == .@"union" and strategy_info.@"union".tag_type != null) {
+                return strategy;
+            }
+
+            // Check if it's an anonymous struct literal
+            if (strategy_info == .@"struct") {
+                // Try to construct UnionStrategy from struct fields
+                var has_bare = false;
+                var discriminant: ?[]const u8 = null;
+
+                inline for (strategy_info.@"struct".fields) |strat_field| {
+                    if (comptime std.mem.eql(u8, strat_field.name, "bare")) {
+                        has_bare = true;
+                    } else if (comptime std.mem.eql(u8, strat_field.name, "discriminated")) {
+                        discriminant = @field(strategy, "discriminated");
+                    }
+                }
+
+                if (has_bare) {
+                    return .bare;
+                }
+
+                if (discriminant) |d| {
+                    return .{ .discriminated = d };
+                }
+            }
+        }
+    }
+
+    // Default: bare mode for scalar unions
+    return .bare;
+}
+
+/// Get the discriminant value for a variant
+/// First tries to find a field with the discriminant name and return its default value
+/// Falls back to the variant name (tag name)
+fn getDiscriminantValue(comptime VariantType: type, comptime discriminant: []const u8, comptime tag_name: []const u8) []const u8 {
+    const variant_info = @typeInfo(VariantType);
+
+    // Check if variant has a field matching the discriminant name
+    if (variant_info == .@"struct") {
+        inline for (variant_info.@"struct".fields) |field| {
+            if (comptime std.mem.eql(u8, field.name, discriminant)) {
+                // Check if it has a default value using defaultValue() method
+                if (field.defaultValue()) |default_val| {
+                    if (@TypeOf(default_val) == []const u8) {
+                        return default_val;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to tag name
+    return tag_name;
 }
 
 // ==================== Tests ====================
@@ -218,139 +245,35 @@ test "Mapper - findFieldBySerializedName" {
     try std.testing.expect(not_found == null);
 }
 
-test "Mapper - adapter jsonStringify" {
-    const Person = struct {
-        name: []const u8,
-        age: u32,
+// ==================== Union Tests ====================
+
+test "Mapper - union bare mode metadata" {
+    const RequestId = union(enum) {
+        string: []const u8,
+        number: i64,
     };
 
-    const PersonMapper = Mapper(Person, .{
-        .name = .{ .alias = "person_name" },
+    const RequestIdMapper = Mapper(RequestId, .{
+        .union_strategy = .bare,
     });
 
-    const person = Person{
-        .name = "Alice",
-        .age = 30,
-    };
-
-    const adapter = PersonMapper.adapter(person);
-
-    // Test adapter using std.json.Stringify.valueAlloc
-    const allocator = std.testing.allocator;
-    const json = try std.json.Stringify.valueAlloc(allocator, adapter, .{});
-    defer allocator.free(json);
-
-    // Verify JSON contains alias
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"person_name\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"Alice\"") != null);
+    // Verify union strategy is correctly stored
+    try std.testing.expectEqual(RequestId, RequestIdMapper.TargetType);
+    try std.testing.expect(std.meta.activeTag(RequestIdMapper.union_strategy) == .bare);
 }
 
-// ==================== Nested Mapper Tests ====================
-
-test "Mapper - nested struct with mapping" {
-    const Address = struct {
-        street: []const u8,
-        city: []const u8,
-        password: []const u8,
+test "Mapper - union discriminated mode metadata" {
+    const Content = union(enum) {
+        text: struct { value: []const u8 },
+        image: struct { data: []const u8 },
     };
 
-    const Person = struct {
-        name: []const u8,
-        address: Address,
-    };
-
-    // Define Mapper for nested struct
-    const AddressMapper = Mapper(Address, .{
-        .password = .skip,
-        .street = .{ .alias = "road" },
+    const ContentMapper = Mapper(Content, .{
+        .union_strategy = .{ .discriminated = "type" },
     });
 
-    // Define Mapper for main struct, referencing nested Mapper
-    const PersonMapper = Mapper(Person, .{
-        .name = .{ .alias = "person_name" },
-        .address = .{ .nested = AddressMapper },
-    });
-
-    const person = Person{
-        .name = "Alice",
-        .address = .{
-            .street = "123 Main St",
-            .city = "New York",
-            .password = "secret123",
-        },
-    };
-
-    const adapter = PersonMapper.adapter(person);
-    const allocator = std.testing.allocator;
-    const json = try std.json.Stringify.valueAlloc(allocator, adapter, .{});
-    defer allocator.free(json);
-
-    // Verify outer alias
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"person_name\"") != null);
-    // Verify nested struct field mapping
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"road\"") != null); // street -> road
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"street\"") == null);
-    // Verify nested struct skip
-    try std.testing.expect(std.mem.indexOf(u8, json, "password") == null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "secret123") == null);
-    // Verify unchanged fields
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"city\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"New York\"") != null);
-}
-
-test "Mapper - deeply nested with multiple mappers" {
-    const Hobby = struct {
-        name: []const u8,
-        years: u32,
-        secret_note: []const u8,
-    };
-
-    const Address = struct {
-        street: []const u8,
-        hobbies: []const Hobby,
-    };
-
-    const Person = struct {
-        name: []const u8,
-        address: Address,
-    };
-
-    // Define Mappers for each nesting level
-    // Note: HobbyMapper is defined but not yet applied to array elements
-    // Array element mapping will be supported in future versions
-    _ = Mapper(Hobby, .{
-        .secret_note = .skip,
-        .years = .{ .alias = "experience_years" },
-    });
-
-    const AddressMapper = Mapper(Address, .{
-        .street = .{ .alias = "road" },
-    });
-
-    const PersonMapper = Mapper(Person, .{
-        .name = .{ .alias = "full_name" },
-        .address = .{ .nested = AddressMapper },
-    });
-
-    const person = Person{
-        .name = "Bob",
-        .address = .{
-            .street = "456 Oak Ave",
-            .hobbies = &.{
-                .{ .name = "reading", .years = 5, .secret_note = "my favorite" },
-            },
-        },
-    };
-
-    const adapter = PersonMapper.adapter(person);
-    const allocator = std.testing.allocator;
-    const json = try std.json.Stringify.valueAlloc(allocator, adapter, .{});
-    defer allocator.free(json);
-
-    // Verify outer mapping
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"full_name\"") != null);
-    // Verify first level nested mapping
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"road\"") != null);
-    // Note: Hobbies array inner structs don't have HobbyMapper applied yet
-    // This requires more complex array element mapping, will be supported in future versions
+    // Verify union strategy is correctly stored
+    try std.testing.expectEqual(Content, ContentMapper.TargetType);
+    try std.testing.expect(std.meta.activeTag(ContentMapper.union_strategy) == .discriminated);
+    try std.testing.expectEqualStrings("type", ContentMapper.union_strategy.discriminated);
 }
