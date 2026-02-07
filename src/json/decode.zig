@@ -183,3 +183,25 @@ test "decode - array with element mapper" {
     try std.testing.expectEqualStrings("gaming", person.hobbies[1].name);
     try std.testing.expectEqual(@as(u32, 3), person.hobbies[1].years);
 }
+
+test "decode - with arena allocator" {
+    const allocator = std.testing.allocator;
+
+    const Person = struct {
+        name: []const u8,
+        age: u32,
+    };
+
+    const PersonMapper = mapper.Mapper(Person, .{});
+
+    // Use arena allocator for batch operations
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const json_str = "{\"name\":\"Alice\",\"age\":30}";
+    const person = try decode(arena.allocator(), PersonMapper, json_str);
+
+    try std.testing.expectEqualStrings("Alice", person.name);
+    try std.testing.expectEqual(@as(u32, 30), person.age);
+    // All allocations freed at once when arena deinits
+}
