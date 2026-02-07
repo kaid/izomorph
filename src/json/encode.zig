@@ -369,3 +369,117 @@ test "encode - multiple aliases" {
     // Verify complete JSON output
     try std.testing.expectEqualStrings("{\"firstName\":\"John\",\"lastName\":\"Doe\",\"age\":35}", result);
 }
+
+test "encode - union variant with omit_null mapper" {
+    const allocator = std.testing.allocator;
+
+    // Define a variant struct with optional field
+    const TextContent = struct {
+        pub const Mapper = mapper.Mapper(@This(), .{
+            .optional_field = .{ .omit_null = true },
+        });
+
+        value: []const u8,
+        optional_field: ?[]const u8,
+    };
+
+    // Define a discriminated union
+    const Content = union(enum) {
+        text: TextContent,
+        number: i64,
+    };
+
+    const ContentMapper = mapper.Mapper(Content, .{
+        .union_strategy = .{ .discriminated = "type" },
+    });
+
+    // Test with null optional_field - should be omitted
+    const content_with_null = Content{
+        .text = .{
+            .value = "hello",
+            .optional_field = null,
+        },
+    };
+
+    const result1 = try encode(allocator, content_with_null, ContentMapper, .{});
+    defer allocator.free(result1);
+
+    // Verify optional_field is omitted when null
+    try std.testing.expectEqualStrings("{\"type\":\"text\",\"value\":\"hello\"}", result1);
+
+    // Test with non-null optional_field - should be included
+    const content_with_value = Content{
+        .text = .{
+            .value = "world",
+            .optional_field = "extra",
+        },
+    };
+
+    const result2 = try encode(allocator, content_with_value, ContentMapper, .{});
+    defer allocator.free(result2);
+
+    // Verify optional_field is included when not null
+    try std.testing.expectEqualStrings("{\"type\":\"text\",\"value\":\"world\",\"optional_field\":\"extra\"}", result2);
+}
+
+test "encode - bare union variant with mapper" {
+    const allocator = std.testing.allocator;
+
+    // Define a variant struct with optional field and mapper
+    const TextData = struct {
+        pub const Mapper = mapper.Mapper(@This(), .{
+            .content = .{ .alias = "text" },
+            .metadata = .{ .omit_null = true },
+        });
+
+        content: []const u8,
+        metadata: ?[]const u8,
+    };
+
+    // Define a bare union
+    const Data = union(enum) {
+        text: TextData,
+        raw: []const u8,
+    };
+
+    const DataMapper = mapper.Mapper(Data, .{
+        .union_strategy = .bare,
+    });
+
+    // Test struct variant with mapper - should apply alias and omit_null
+    const data_with_null = Data{
+        .text = .{
+            .content = "hello",
+            .metadata = null,
+        },
+    };
+
+    const result1 = try encode(allocator, data_with_null, DataMapper, .{});
+    defer allocator.free(result1);
+
+    // Verify alias is applied and null field is omitted
+    try std.testing.expectEqualStrings("{\"text\":\"hello\"}", result1);
+
+    // Test with non-null metadata
+    const data_with_metadata = Data{
+        .text = .{
+            .content = "world",
+            .metadata = "extra info",
+        },
+    };
+
+    const result2 = try encode(allocator, data_with_metadata, DataMapper, .{});
+    defer allocator.free(result2);
+
+    // Verify all fields included when metadata is not null
+    try std.testing.expectEqualStrings("{\"text\":\"world\",\"metadata\":\"extra info\"}", result2);
+
+    // Test scalar variant - should work as before
+    const data_raw = Data{ .raw = "direct string" };
+
+    const result3 = try encode(allocator, data_raw, DataMapper, .{});
+    defer allocator.free(result3);
+
+    // Verify bare scalar serialization
+    try std.testing.expectEqualStrings("\"direct string\"", result3);
+}

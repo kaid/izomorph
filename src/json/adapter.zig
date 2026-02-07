@@ -63,6 +63,106 @@ fn getDiscriminantValue(comptime VariantType: type, comptime discriminant: []con
     return tag_name;
 }
 
+/// Write array with element mapper applied to each element (top-level function)
+fn writeArrayWithElementMapper(jws: anytype, array: anytype, comptime ElementMapper: type) !void {
+    const ElementAdapter = createAdapter(ElementMapper);
+    // Unwrap optional array/slice if present
+    const info = @typeInfo(@TypeOf(array));
+    if (info == .optional) {
+        if (array) |payload| {
+            try jws.beginArray();
+            for (payload) |element| {
+                const element_adapter = ElementAdapter{ .value = element };
+                try jws.write(element_adapter);
+            }
+            try jws.endArray();
+        } else {
+            try jws.write(null);
+        }
+    } else {
+        try jws.beginArray();
+        for (array) |element| {
+            const element_adapter = ElementAdapter{ .value = element };
+            try jws.write(element_adapter);
+        }
+        try jws.endArray();
+    }
+}
+
+/// Write struct fields to JSON using the given Mapper
+/// This is the core field serialization logic extracted for reuse
+fn writeStructFields(value: anytype, jws: anytype, comptime MapperType: type) !void {
+    const fields = MapperType.fields;
+
+    // Iterate over all fields
+    inline for (fields) |field_meta| {
+        if (field_meta.should_skip) continue;
+
+        // Get field value
+        const field_value = @field(value, field_meta.name);
+
+        // Check skip
+        var should_process = true;
+
+        // Check omit_null
+        if (comptime field_meta.omit_null) {
+            if (field_value == null) should_process = false;
+        }
+
+        // Check omit_default
+        if (should_process and comptime field_meta.omit_default) {
+            if (field_meta.has_default_value) {
+                if (isDefaultValue(field_value, field_meta.default_value)) should_process = false;
+            } else {
+                // If no default specified in rules, use type's default (e.g., false, 0, null)
+                if (isTypeDefault(field_value)) should_process = false;
+            }
+        }
+
+        if (should_process) {
+            // Use mapped field name
+            try jws.objectField(field_meta.serialized_name);
+
+            // If has nested Mapper, recursively serialize
+            if (comptime field_meta.has_nested_mapper) {
+                const NestedAdapter = createAdapter(field_meta.nested_mapper);
+                // Unwrap optional if present
+                const info = @typeInfo(@TypeOf(field_value));
+                if (info == .optional) {
+                    if (field_value) |payload| {
+                        try jws.write(NestedAdapter{ .value = payload });
+                    } else {
+                        try jws.write(null);
+                    }
+                } else {
+                    try jws.write(NestedAdapter{ .value = field_value });
+                }
+            } else if (comptime field_meta.has_element_mapper) {
+                // Handle array/slice with element mapper
+                try writeArrayWithElementMapper(jws, field_value, field_meta.element_mapper);
+            } else {
+                // Otherwise serialize field value directly
+                try jws.write(field_value);
+            }
+        }
+    }
+}
+
+/// Check if a type has a pub const Mapper declaration
+fn hasMapper(comptime T: type) bool {
+    return @hasDecl(T, "Mapper");
+}
+
+/// Get the Mapper for a type (uses pub const Mapper if available, otherwise creates default)
+fn getTypeMapper(comptime T: type) type {
+    if (comptime hasMapper(T)) {
+        return T.Mapper;
+    } else {
+        // Create a default mapper with no special configuration
+        return @import("../mapper.zig").Mapper(T, .{});
+    }
+}
+
 /// Create a JSON Adapter for struct serialization
 pub fn createStructAdapter(comptime MapperType: type) type {
     const T = MapperType.TargetType;
@@ -73,90 +173,9 @@ pub fn createStructAdapter(comptime MapperType: type) type {
 
         /// Serialize a value to JSON
         pub fn stringify(value: T, jws: anytype) !void {
-            const fields = Mapper.fields;
-
             try jws.beginObject();
-
-            // Iterate over all fields
-            inline for (fields) |field_meta| {
-                if (field_meta.should_skip) continue;
-
-                // Get field value
-                const field_value = @field(value, field_meta.name);
-
-                // Check skip
-                var should_process = true;
-
-                // Check omit_null
-                if (comptime field_meta.omit_null) {
-                    if (field_value == null) should_process = false;
-                }
-
-                // Check omit_default
-                if (should_process and comptime field_meta.omit_default) {
-                    if (field_meta.has_default_value) {
-                        if (isDefaultValue(field_value, field_meta.default_value)) should_process = false;
-                    } else {
-                        // If no default specified in rules, use type's default (e.g., false, 0, null)
-                        if (isTypeDefault(field_value)) should_process = false;
-                    }
-                }
-
-                if (should_process) {
-                    // Use mapped field name
-                    try jws.objectField(field_meta.serialized_name);
-
-                    // If has nested Mapper, recursively serialize
-                    if (comptime field_meta.has_nested_mapper) {
-                        const NestedAdapter = createAdapter(field_meta.nested_mapper);
-                        // Unwrap optional if present
-                        const info = @typeInfo(@TypeOf(field_value));
-                        if (info == .optional) {
-                            if (field_value) |payload| {
-                                try jws.write(NestedAdapter{ .value = payload });
-                            } else {
-                                try jws.write(null);
-                            }
-                        } else {
-                            try jws.write(NestedAdapter{ .value = field_value });
-                        }
-                    } else if (comptime field_meta.has_element_mapper) {
-                        // Handle array/slice with element mapper
-                        try writeArrayWithElementMapper(jws, field_value, field_meta.element_mapper);
-                    } else {
-                        // Otherwise serialize field value directly
-                        try jws.write(field_value);
-                    }
-                }
-            }
-
+            try writeStructFields(value, jws, MapperType);
             try jws.endObject();
-        }
-
-        /// Write array with element mapper applied to each element
-        fn writeArrayWithElementMapper(jws: anytype, array: anytype, comptime ElementMapper: type) !void {
-            const ElementAdapter = createAdapter(ElementMapper);
-            // Unwrap optional array/slice if present
-            const info = @typeInfo(@TypeOf(array));
-            if (info == .optional) {
-                if (array) |payload| {
-                    try jws.beginArray();
-                    for (payload) |element| {
-                        const element_adapter = ElementAdapter{ .value = element };
-                        try jws.write(element_adapter);
-                    }
-                    try jws.endArray();
-                } else {
-                    try jws.write(null);
-                }
-            } else {
-                try jws.beginArray();
-                for (array) |element| {
-                    const element_adapter = ElementAdapter{ .value = element };
-                    try jws.write(element_adapter);
-                }
-                try jws.endArray();
-            }
         }
 
         /// Parse from JSON source
@@ -438,12 +457,22 @@ fn createUnionAdapter(comptime MapperType: type) type {
         }
 
         fn stringifyBare(value: T, jws: anytype) !void {
-            const union_info = @typeInfo(T).@"union";
-            inline for (union_info.fields) |field| {
-                if (value == @field(T, field.name)) {
-                    try jws.write(@field(value, field.name));
-                    return;
-                }
+            switch (value) {
+                inline else => |variant_value| {
+                    const VariantType = @TypeOf(variant_value);
+                    const variant_info = @typeInfo(VariantType);
+
+                    // For struct types, check if there's a Mapper and use it
+                    if (variant_info == .@"struct" and comptime hasMapper(VariantType)) {
+                        const VariantMapper = getTypeMapper(VariantType);
+                        try jws.beginObject();
+                        try writeStructFields(variant_value, jws, VariantMapper);
+                        try jws.endObject();
+                    } else {
+                        // For scalar types or structs without Mapper, write directly
+                        try jws.write(variant_value);
+                    }
+                },
             }
         }
 
@@ -471,11 +500,20 @@ fn createUnionAdapter(comptime MapperType: type) type {
                 try jws.objectField(discriminant);
                 try jws.write(discriminant_value);
 
-                const variant_struct_info = variant_info.@"struct";
-                inline for (variant_struct_info.fields) |variant_field| {
-                    if (comptime std.mem.eql(u8, variant_field.name, discriminant)) continue;
-                    try jws.objectField(variant_field.name);
-                    try jws.write(@field(variant_value, variant_field.name));
+                // Check if variant type has a pub const Mapper - use it if available
+                if (comptime hasMapper(VariantType)) {
+                    // Use the variant's own Mapper to serialize fields
+                    // This ensures omit_null and other mapper rules are respected
+                    const VariantMapper = getTypeMapper(VariantType);
+                    try writeStructFields(variant_value, jws, VariantMapper);
+                } else {
+                    // Fallback: manually iterate fields (original behavior)
+                    const variant_struct_info = variant_info.@"struct";
+                    inline for (variant_struct_info.fields) |variant_field| {
+                        if (comptime std.mem.eql(u8, variant_field.name, discriminant)) continue;
+                        try jws.objectField(variant_field.name);
+                        try jws.write(@field(variant_value, variant_field.name));
+                    }
                 }
                 try jws.endObject();
             } else {
@@ -503,14 +541,14 @@ pub fn encodeWithMapper(
 }
 
 /// Decode a value using its Mapper configuration
-/// Decode a value using its Mapper configuration  
+/// Decode a value using its Mapper configuration
 pub fn decodeWithMapper(
     allocator: std.mem.Allocator,
     comptime MapperType: type,
     json_str: []const u8,
 ) !MapperType.TargetType {
     const Adapter = createAdapter(MapperType);
-    
+
     var scanner = std.json.Scanner.initCompleteInput(allocator, json_str);
     defer scanner.deinit();
 
