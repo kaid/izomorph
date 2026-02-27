@@ -5,8 +5,11 @@
 
 const std = @import("std");
 
-/// JSON decoding error set
+/// JSON decoding error set for complete input
 pub const Error = std.json.ParseError(std.json.Scanner) || error{MissingField};
+
+/// JSON decoding error set for streaming from Io.Reader
+pub const ReaderError = std.json.ParseError(std.json.Reader) || error{MissingField};
 
 /// Decoding options
 pub const DecodeOptions = struct {
@@ -35,6 +38,36 @@ pub fn decode(
 ) Error!MapperType.TargetType {
     // Use the adapter module for decoding
     return try @import("adapter.zig").decodeWithMapper(allocator, MapperType, json_str);
+}
+
+/// Decode JSON from an Io.Reader (streaming)
+///
+/// This function allows decoding JSON directly from any reader without loading
+/// the entire input into memory first. Useful for reading from network sockets,
+/// files, or other streaming sources.
+///
+/// The Reader internally handles buffering and automatically refills when needed.
+/// Memory usage is O(nesting depth) rather than O(document size).
+///
+/// Usage example:
+/// ```zig
+/// var file = try std.fs.cwd().openFile("data.json", .{});
+/// defer file.close();
+/// var reader = file.reader();
+/// const person = try izo.json.decodeFromReader(allocator, PersonMapper, &reader);
+/// ```
+///
+/// For HTTP request body parsing:
+/// ```zig
+/// var request_reader: std.Io.Reader = request.bodyReader();
+/// const body = try izo.json.decodeFromReader(arena.allocator(), RequestMapper, &request_reader);
+/// ```
+pub fn decodeFromReader(
+    allocator: std.mem.Allocator,
+    comptime MapperType: type,
+    reader: *std.Io.Reader,
+) ReaderError!MapperType.TargetType {
+    return try @import("adapter.zig").decodeWithReader(allocator, MapperType, reader);
 }
 
 // ==================== Tests ====================
@@ -204,4 +237,139 @@ test "decode - with arena allocator" {
     try std.testing.expectEqualStrings("Alice", person.name);
     try std.testing.expectEqual(@as(u32, 30), person.age);
     // All allocations freed at once when arena deinits
+}
+
+// ==================== decodeFromReader Tests ====================
+
+test "decodeFromReader - basic struct" {
+    const gpa = std.testing.allocator;
+
+    const Person = struct {
+        name: []const u8,
+        age: u32,
+    };
+
+    const PersonMapper = mapper.Mapper(Person, .{});
+
+    const json_str = "{\"name\":\"Alice\",\"age\":30}";
+    var reader: std.Io.Reader = .fixed(json_str);
+
+    // Use arena for automatic cleanup
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
+    const person = try decodeFromReader(arena.allocator(), PersonMapper, &reader);
+
+    try std.testing.expectEqualStrings("Alice", person.name);
+    try std.testing.expectEqual(@as(u32, 30), person.age);
+}
+
+test "decodeFromReader - struct with alias" {
+    const gpa = std.testing.allocator;
+
+    const Person = struct {
+        name: []const u8,
+        age: u32,
+    };
+
+    const PersonMapper = mapper.Mapper(Person, .{
+        .name = .{ .alias = "person_name" },
+    });
+
+    const json_str = "{\"person_name\":\"Bob\",\"age\":25}";
+    var reader: std.Io.Reader = .fixed(json_str);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
+    const person = try decodeFromReader(arena.allocator(), PersonMapper, &reader);
+
+    try std.testing.expectEqualStrings("Bob", person.name);
+    try std.testing.expectEqual(@as(u32, 25), person.age);
+}
+
+test "decodeFromReader - ignore unknown fields" {
+    const gpa = std.testing.allocator;
+
+    const Person = struct {
+        name: []const u8,
+        age: u32,
+    };
+
+    const PersonMapper = mapper.Mapper(Person, .{});
+
+    const json_str = "{\"name\":\"Charlie\",\"age\":35,\"extra\":\"ignored\"}";
+    var reader: std.Io.Reader = .fixed(json_str);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
+    const person = try decodeFromReader(arena.allocator(), PersonMapper, &reader);
+
+    try std.testing.expectEqualStrings("Charlie", person.name);
+    try std.testing.expectEqual(@as(u32, 35), person.age);
+}
+
+test "decodeFromReader - nested struct" {
+    const gpa = std.testing.allocator;
+
+    const Address = struct {
+        street: []const u8,
+        city: []const u8,
+    };
+
+    const Person = struct {
+        name: []const u8,
+        address: Address,
+    };
+
+    const AddressMapper = mapper.Mapper(Address, .{
+        .street = .{ .alias = "road" },
+    });
+
+    const PersonMapper = mapper.Mapper(Person, .{
+        .address = .{ .nested = AddressMapper },
+    });
+
+    const json_str = "{\"name\":\"Dave\",\"address\":{\"road\":\"123 Main St\",\"city\":\"Boston\"}}";
+    var reader: std.Io.Reader = .fixed(json_str);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
+    const person = try decodeFromReader(arena.allocator(), PersonMapper, &reader);
+
+    try std.testing.expectEqualStrings("Dave", person.name);
+    try std.testing.expectEqualStrings("123 Main St", person.address.street);
+    try std.testing.expectEqualStrings("Boston", person.address.city);
+}
+
+test "decodeFromReader - parity with decode" {
+    const gpa = std.testing.allocator;
+
+    const Person = struct {
+        name: []const u8,
+        age: u32,
+    };
+
+    const PersonMapper = mapper.Mapper(Person, .{
+        .name = .{ .alias = "person_name" },
+    });
+
+    const json_str = "{\"person_name\":\"Eve\",\"age\":28}";
+
+    // Method 1: decode() with complete string (using arena)
+    var arena1 = std.heap.ArenaAllocator.init(gpa);
+    defer arena1.deinit();
+    const person1 = try decode(arena1.allocator(), PersonMapper, json_str);
+
+    // Method 2: decodeFromReader() with Io.Reader (using arena)
+    var arena2 = std.heap.ArenaAllocator.init(gpa);
+    defer arena2.deinit();
+    var reader: std.Io.Reader = .fixed(json_str);
+    const person2 = try decodeFromReader(arena2.allocator(), PersonMapper, &reader);
+
+    // Both should produce identical results
+    try std.testing.expectEqualStrings(person1.name, person2.name);
+    try std.testing.expectEqual(person1.age, person2.age);
 }

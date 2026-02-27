@@ -57,6 +57,8 @@ pub const json = struct {
     pub const EncodeOptions = @import("json/encode.zig").EncodeOptions;
     /// JSON decoder
     pub const decode = @import("json/decode.zig").decode;
+    /// JSON decoder from reader (streaming)
+    pub const decodeFromReader = @import("json/decode.zig").decodeFromReader;
     /// Decoding options
     pub const DecodeOptions = @import("json/decode.zig").DecodeOptions;
 };

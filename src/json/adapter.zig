@@ -560,3 +560,24 @@ pub fn decodeWithMapper(
 
     return try Adapter.jsonParse(allocator, &scanner, options);
 }
+
+/// Decode a value using its Mapper configuration from an Io.Reader (streaming)
+pub fn decodeWithReader(
+    allocator: std.mem.Allocator,
+    comptime MapperType: type,
+    reader: *std.Io.Reader,
+) !MapperType.TargetType {
+    const Adapter = createAdapter(MapperType);
+
+    var json_reader = std.json.Reader.init(allocator, reader);
+    defer json_reader.deinit();
+
+    const options = std.json.ParseOptions{
+        .ignore_unknown_fields = true,
+        .duplicate_field_behavior = .use_last,
+        .max_value_len = std.json.default_max_value_len,
+        .allocate = .alloc_always,
+    };
+
+    return try Adapter.jsonParse(allocator, &json_reader, options);
+}
