@@ -51,6 +51,8 @@ pub const Mapper = @import("mapper.zig").Mapper;
 pub const json = struct {
     /// JSON encoder
     pub const encode = @import("json/encode.zig").encode;
+    /// JSON encoder to writer (zero-allocation streaming)
+    pub const encodeToWriter = @import("json/encode.zig").encodeToWriter;
     /// Encoding options
     pub const EncodeOptions = @import("json/encode.zig").EncodeOptions;
     /// JSON decoder

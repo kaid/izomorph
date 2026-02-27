@@ -44,6 +44,35 @@ pub fn encode(
     return try @import("adapter.zig").encodeWithMapper(allocator, value, MapperType, options.toStdOptions());
 }
 
+/// Encode a value to JSON and write directly to a writer (zero-allocation streaming)
+///
+/// This function allows encoding directly to any writer without intermediate memory allocation.
+/// Useful for streaming JSON output to network sockets, files, or other sinks.
+///
+/// Usage example:
+/// ```zig
+/// var buffer: [256]u8 = undefined;
+/// var writer: std.Io.Writer = .fixed(&buffer);
+/// try izo.json.encodeToWriter(&writer, person, PersonMapper, .{});
+/// const json_str = writer.buffered();
+/// ```
+///
+/// For LLM Gateway scenarios, you can write directly to a socket:
+/// ```zig
+/// var socket_writer: std.Io.Writer = ...;
+/// try izo.json.encodeToWriter(&socket_writer, response, ResponseMapper, .{});
+/// ```
+pub fn encodeToWriter(
+    writer: *std.Io.Writer,
+    value: anytype,
+    comptime MapperType: type,
+    options: EncodeOptions,
+) std.json.Stringify.Error!void {
+    const Adapter = @import("adapter.zig").createAdapter(MapperType);
+    const adapter = Adapter{ .value = value };
+    try std.json.Stringify.value(adapter, options.toStdOptions(), writer);
+}
+
 // ==================== Tests ====================
 
 const mapper = @import("../mapper.zig");
@@ -482,4 +511,172 @@ test "encode - bare union variant with mapper" {
 
     // Verify bare scalar serialization
     try std.testing.expectEqualStrings("\"direct string\"", result3);
+}
+
+// ==================== encodeToWriter Tests ====================
+
+test "encodeToWriter - basic struct" {
+    const Person = struct {
+        name: []const u8,
+        age: u32,
+    };
+
+    const PersonMapper = mapper.Mapper(Person, .{});
+
+    const person = Person{
+        .name = "Alice",
+        .age = 30,
+    };
+
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try encodeToWriter(&writer, person, PersonMapper, .{});
+
+    try std.testing.expectEqualStrings("{\"name\":\"Alice\",\"age\":30}", writer.buffered());
+}
+
+test "encodeToWriter - struct with alias" {
+    const Person = struct {
+        name: []const u8,
+        age: u32,
+    };
+
+    const PersonMapper = mapper.Mapper(Person, .{
+        .name = .{ .alias = "person_name" },
+    });
+
+    const person = Person{
+        .name = "Bob",
+        .age = 25,
+    };
+
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try encodeToWriter(&writer, person, PersonMapper, .{});
+
+    try std.testing.expectEqualStrings("{\"person_name\":\"Bob\",\"age\":25}", writer.buffered());
+}
+
+test "encodeToWriter - struct with skip" {
+    const Person = struct {
+        name: []const u8,
+        secret: []const u8,
+    };
+
+    const PersonMapper = mapper.Mapper(Person, .{
+        .secret = .skip,
+    });
+
+    const person = Person{
+        .name = "Charlie",
+        .secret = "password123",
+    };
+
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try encodeToWriter(&writer, person, PersonMapper, .{});
+
+    try std.testing.expectEqualStrings("{\"name\":\"Charlie\"}", writer.buffered());
+}
+
+test "encodeToWriter - nested struct with mapping" {
+    const Address = struct {
+        street: []const u8,
+        city: []const u8,
+        zip: []const u8,
+    };
+
+    const Person = struct {
+        name: []const u8,
+        address: Address,
+    };
+
+    const AddressMapper = mapper.Mapper(Address, .{
+        .street = .{ .alias = "road" },
+        .zip = .skip,
+    });
+
+    const PersonMapper = mapper.Mapper(Person, .{
+        .name = .{ .alias = "full_name" },
+        .address = .{ .nested = AddressMapper },
+    });
+
+    const person = Person{
+        .name = "Alice",
+        .address = .{
+            .street = "123 Main St",
+            .city = "New York",
+            .zip = "10001",
+        },
+    };
+
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try encodeToWriter(&writer, person, PersonMapper, .{});
+
+    try std.testing.expectEqualStrings(
+        "{\"full_name\":\"Alice\",\"address\":{\"road\":\"123 Main St\",\"city\":\"New York\"}}",
+        writer.buffered(),
+    );
+}
+
+test "encodeToWriter - with pretty printing" {
+    const Person = struct {
+        name: []const u8,
+        age: u32,
+    };
+
+    const PersonMapper = mapper.Mapper(Person, .{});
+
+    const person = Person{
+        .name = "Alice",
+        .age = 30,
+    };
+
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    try encodeToWriter(&writer, person, PersonMapper, .{ .pretty = true });
+
+    const expected =
+        \\{
+        \\  "name": "Alice",
+        \\  "age": 30
+        \\}
+    ;
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+}
+
+test "encodeToWriter - zero allocation comparison" {
+    const allocator = std.testing.allocator;
+
+    const Person = struct {
+        name: []const u8,
+        age: u32,
+    };
+
+    const PersonMapper = mapper.Mapper(Person, .{
+        .name = .{ .alias = "person_name" },
+    });
+
+    const person = Person{
+        .name = "Dave",
+        .age = 40,
+    };
+
+    // Method 1: encode() with allocation
+    const allocated_result = try encode(allocator, person, PersonMapper, .{});
+    defer allocator.free(allocated_result);
+
+    // Method 2: encodeToWriter() to fixed buffer
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try encodeToWriter(&writer, person, PersonMapper, .{});
+
+    // Both should produce identical output
+    try std.testing.expectEqualStrings(allocated_result, writer.buffered());
 }
