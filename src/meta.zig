@@ -41,13 +41,47 @@ pub const FieldStrategy = union(enum) {
     custom: CustomConfig,
 };
 
-/// Custom serializer/deserializer configuration
+/// Custom serializer/deserializer configuration.
+///
+/// Usage example:
+/// ```zig
+/// const MySerializer = struct {
+///     // Two signatures supported:
+///     // 1. fn serialize(value: T, jws: anytype) !void
+///     // 2. fn serialize(value: T, jws: anytype, helpers: anytype) !void
+///     pub fn serialize(value: MyType, jws: anytype, helpers: anytype) !void {
+///         // helpers methods available when using 3-param signature:
+///         // - helpers.writeMapped(value: anytype) !void
+///         // See: src/json/adapter.zig - fn Helpers() for full implementation
+///         try helpers.writeMapped(nested_value);
+///     }
+/// };
+///
+/// const MyDeserializer = struct {
+///     pub fn deserialize(allocator: std.mem.Allocator, source: anytype) !MyType {
+///         // ...
+///     }
+/// };
+///
+/// const config = .{
+///     .strategy = .{ .custom = .{
+///         .to = MySerializer,
+///         .from = MyDeserializer,
+///         .with = &.{NestedType.Mapper},  // Mappers for helpers.writeMapped()
+///     }},
+/// };
+/// ```
 pub const CustomConfig = struct {
-    /// Serializer type - should have: pub fn serialize(value: T, jws: anytype, helpers: ?anytype) !void
+    /// Serializer type - should have pub fn serialize(...)
+    /// Signature: fn (value: T, jws: anytype) !void
+    ///     OR: fn (value: T, jws: anytype, helpers: anytype) !void
+    /// For helpers methods, see src/json/adapter.zig fn Helpers()
     to: type = void,
-    /// Deserializer type - should have: pub fn deserialize(allocator: Allocator, source: anytype) !T
+    /// Deserializer type - should have:
+    /// fn deserialize(allocator: std.mem.Allocator, source: anytype) !T
     from: type = void,
-    /// Optional array of mapper types for auto-matching in custom serializers
+    /// Optional array of mapper types for auto-matching in custom serializers.
+    /// Used by helpers.writeMapped() to find matching mappers.
     /// Example: .with = &.{JsonSchemaMapper, OtherMapper}
     with: ?[]const type = null,
 
