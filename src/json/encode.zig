@@ -1048,3 +1048,37 @@ test "custom serializer with helpers - auto-matching nested mapper" {
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\"ref\":null") == null);
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\"description\":null") == null);
 }
+
+// Test automatic element mapper detection from pub const Mapper
+const AutoInner = struct {
+    value: i32,
+    // Element type declares its own Mapper
+    pub const Mapper = AutoInnerMapper;
+};
+
+const AutoOuter = struct {
+    items: []const AutoInner,
+};
+
+const AutoInnerMapper = mapper.Mapper(AutoInner, .{});
+const AutoOuterMapper = mapper.Mapper(AutoOuter, .{
+    // No element_mapper configured - should auto-detect from AutoInner.Mapper
+});
+
+test "automatic element mapper detection from pub const Mapper" {
+    const allocator = std.testing.allocator;
+
+    const outer = AutoOuter{
+        .items = &[_]AutoInner{
+            .{ .value = 10 },
+            .{ .value = 20 },
+        },
+    };
+
+    const json_str = try encode(allocator, outer, AutoOuterMapper, .{});
+    defer allocator.free(json_str);
+
+    // Should apply AutoInner.Mapper to each element
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"value\":10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"value\":20") != null);
+}

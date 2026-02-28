@@ -157,12 +157,20 @@ fn writeStructFields(value: anytype, jws: anytype, comptime MapperType: type) !v
                         try writeArrayWithElementMapper(jws, field_value, field_meta.element_mapper);
                     } else {
                         // No element mapper configured - try to auto-detect from element type's pub const Mapper
-                        const AutoElementMapper = comptime blk2: {
-                            // Extract element type from array/slice
-                            const ArrayFieldType = @TypeOf(field_value);
-                            const array_field_info = @typeInfo(ArrayFieldType);
-                            if (array_field_info == .pointer and array_field_info.pointer.size == .slice) {
-                                const ElementType = array_field_info.pointer.child;
+                        const MaybeElementMapper: ?type = comptime blk2: {
+                            // Extract element type from array/slice (handles ?[]T and []T)
+                            var ArrayOrOptionalType = @TypeOf(field_value);
+                            var type_info = @typeInfo(ArrayOrOptionalType);
+
+                            // Unwrap optional if present
+                            if (type_info == .optional) {
+                                ArrayOrOptionalType = type_info.optional.child;
+                                type_info = @typeInfo(ArrayOrOptionalType);
+                            }
+
+                            // Check if it's a slice
+                            if (type_info == .pointer and type_info.pointer.size == .slice) {
+                                const ElementType = type_info.pointer.child;
                                 // Check if element type is a composite type that can have declarations
                                 const element_type_info = @typeInfo(ElementType);
                                 const isCompositeType = element_type_info == .@"struct" or
@@ -176,7 +184,7 @@ fn writeStructFields(value: anytype, jws: anytype, comptime MapperType: type) !v
                             }
                             break :blk2 null;
                         };
-                        if (AutoElementMapper) |ElementMapper| {
+                        if (MaybeElementMapper) |ElementMapper| {
                             try writeArrayWithElementMapper(jws, field_value, ElementMapper);
                         } else {
                             try jws.write(field_value);
