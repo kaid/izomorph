@@ -817,3 +817,27 @@ test "mzp integration - TaskStatus with custom enum strategy" {
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\"status\":\"working\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\"running\"") == null);
 }
+
+// Test for double serialization issue
+test "nested mapper should not cause double serialization" {
+    const allocator = std.testing.allocator;
+
+    const DoubleInner = struct {
+        value: i32,
+        pub const Mapper = mapper.Mapper(@This(), .{});
+    };
+
+    const DoubleOuter = struct {
+        inner: DoubleInner,
+        pub const Mapper = mapper.Mapper(@This(), .{
+            .inner = .{ .nested = DoubleInner.Mapper },
+        });
+    };
+
+    const outer = DoubleOuter{ .inner = .{ .value = 42 } };
+    const json_str = try encode(allocator, outer, DoubleOuter.Mapper, .{});
+    defer allocator.free(json_str);
+
+    // Should be {"inner":{"value":42}}, not {"innerinner":...} or similar
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"inner\":{\"value\":42}") != null);
+}
