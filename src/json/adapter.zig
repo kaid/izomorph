@@ -421,7 +421,7 @@ fn createStructAdapterWrapper(comptime MapperType: type) type {
 /// Create a JSON Adapter for union serialization
 fn createUnionAdapter(comptime MapperType: type) type {
     const T = MapperType.TargetType;
-    const strategy = MapperType.union_strategy;
+    const strategy = MapperType.strategy;
 
     return struct {
         value: T,

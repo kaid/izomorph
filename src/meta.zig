@@ -4,13 +4,15 @@
 
 const std = @import("std");
 
-/// Union serialization strategy
+/// Union serialization strategy - Tagged Union for mutually exclusive options
+///
+/// Usage:
+///   .strategy = .bare           - Output value directly (default)
+///   .strategy = .{ .discriminated = "type" }  - Output with type field
 pub const UnionStrategy = union(enum) {
     /// Bare/Scalar mode - output the value directly without wrapping
-    /// Used for: RequestId, ProgressToken (string | number)
     bare,
     /// Discriminated union mode - output with a type field
-    /// Format: { "type": "variant_name", ...fields }
     discriminated: []const u8,
 };
 

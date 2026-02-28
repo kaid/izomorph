@@ -419,7 +419,7 @@ test "encode - union variant with omit_null mapper" {
     };
 
     const ContentMapper = mapper.Mapper(Content, .{
-        .union_strategy = .{ .discriminated = "type" },
+        .strategy = .{ .discriminated = "type" },
     });
 
     // Test with null optional_field - should be omitted
@@ -472,7 +472,7 @@ test "encode - bare union variant with mapper" {
     };
 
     const DataMapper = mapper.Mapper(Data, .{
-        .union_strategy = .bare,
+        .strategy = .bare,
     });
 
     // Test struct variant with mapper - should apply alias and omit_null
@@ -695,7 +695,7 @@ const json = std.json;
 const TestRequestId = union(enum) {
     string: []const u8,
     number: i64,
-    pub const Mapper = mapper.Mapper(TestRequestId, .{ .union_strategy = .bare });
+    pub const Mapper = mapper.Mapper(TestRequestId, .{ .strategy = .bare });
 };
 
 const TestMessageWithId = struct {

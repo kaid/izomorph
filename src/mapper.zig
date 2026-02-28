@@ -104,17 +104,16 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
 
 // ==================== Union Mapper ====================
 
-/// Create a Mapper for Union types with special serialization strategies
 /// Create a Mapper for Union types
 fn UnionMapper(comptime T: type, comptime config: anytype) type {
     // Extract union strategy from config
-    const strategy = comptime getUnionStrategy(config);
+    const union_strategy = comptime getUnionStrategy(config);
 
     return struct {
         pub const TargetType = T;
 
         /// Union serialization strategy
-        pub const union_strategy = strategy;
+        pub const strategy = union_strategy;
     };
 }
 
@@ -124,36 +123,30 @@ fn getUnionStrategy(comptime config: anytype) meta_module.UnionStrategy {
     if (config_info != .@"struct") return .bare;
 
     inline for (config_info.@"struct".fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, "union_strategy")) {
-            const strategy = @field(config, "union_strategy");
-            const strategy_type = @TypeOf(strategy);
-            const strategy_info = @typeInfo(strategy_type);
+        if (comptime std.mem.eql(u8, field.name, "strategy")) {
+            const strategy_value = @field(config, "strategy");
 
-            // Check if it's a UnionStrategy type (union(enum))
-            if (strategy_info == .@"union" and strategy_info.@"union".tag_type != null) {
-                return strategy;
+            // Check if it's an explicit UnionStrategy type
+            if (@TypeOf(strategy_value) == meta_module.UnionStrategy) {
+                return strategy_value;
             }
 
-            // Check if it's an anonymous struct literal
+            const strategy_info = @typeInfo(@TypeOf(strategy_value));
+
+            // Check if it's an enum literal like .bare
+            if (strategy_info == .enum_literal) {
+                const literal_name = @tagName(strategy_value);
+                if (comptime std.mem.eql(u8, literal_name, "bare")) return .bare;
+                @compileError("Unknown union strategy: " ++ literal_name);
+            }
+
+            // Check if it's a struct literal (must be discriminated config)
             if (strategy_info == .@"struct") {
-                // Try to construct UnionStrategy from struct fields
-                var has_bare = false;
-                var discriminant: ?[]const u8 = null;
-
                 inline for (strategy_info.@"struct".fields) |strat_field| {
-                    if (comptime std.mem.eql(u8, strat_field.name, "bare")) {
-                        has_bare = true;
-                    } else if (comptime std.mem.eql(u8, strat_field.name, "discriminated")) {
-                        discriminant = @field(strategy, "discriminated");
+                    if (comptime std.mem.eql(u8, strat_field.name, "discriminated")) {
+                        const discriminant = @field(strategy_value, "discriminated");
+                        return .{ .discriminated = discriminant };
                     }
-                }
-
-                if (has_bare) {
-                    return .bare;
-                }
-
-                if (discriminant) |d| {
-                    return .{ .discriminated = d };
                 }
             }
         }
@@ -373,12 +366,12 @@ test "Mapper - union bare mode metadata" {
     };
 
     const RequestIdMapper = Mapper(RequestId, .{
-        .union_strategy = .bare,
+        .strategy = .bare,
     });
 
     // Verify union strategy is correctly stored
     try std.testing.expectEqual(RequestId, RequestIdMapper.TargetType);
-    try std.testing.expect(std.meta.activeTag(RequestIdMapper.union_strategy) == .bare);
+    try std.testing.expect(std.meta.activeTag(RequestIdMapper.strategy) == .bare);
 }
 
 test "Mapper - union discriminated mode metadata" {
@@ -388,11 +381,11 @@ test "Mapper - union discriminated mode metadata" {
     };
 
     const ContentMapper = Mapper(Content, .{
-        .union_strategy = .{ .discriminated = "type" },
+        .strategy = .{ .discriminated = "type" },
     });
 
     // Verify union strategy is correctly stored
     try std.testing.expectEqual(Content, ContentMapper.TargetType);
-    try std.testing.expect(std.meta.activeTag(ContentMapper.union_strategy) == .discriminated);
-    try std.testing.expectEqualStrings("type", ContentMapper.union_strategy.discriminated);
+    try std.testing.expect(std.meta.activeTag(ContentMapper.strategy) == .discriminated);
+    try std.testing.expectEqualStrings("type", ContentMapper.strategy.discriminated);
 }
