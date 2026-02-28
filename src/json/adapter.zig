@@ -175,7 +175,39 @@ fn writeStructFields(value: anytype, jws: anytype, comptime MapperType: type) !v
                 .custom => |custom_config| {
                     if (comptime custom_config.hasSerializer()) {
                         const Serializer = custom_config.to;
-                        try Serializer.serialize(field_value, jws);
+                        // Check if serializer accepts helpers parameter (3 params: value, jws, helpers)
+                        const has_helpers = comptime blk: {
+                            const SerializeFn = @TypeOf(Serializer.serialize);
+                            const info = @typeInfo(SerializeFn);
+                            if (info == .@"fn") {
+                                break :blk info.@"fn".params.len == 3;
+                            }
+                            break :blk false;
+                        };
+
+                        if (has_helpers) {
+                            // Serializer supports helpers - check if mappers are provided
+                            if (custom_config.with) |mappers| {
+                                // Ensure mappers is a slice
+                                const mappers_slice: []const type = mappers;
+                                const HelpersType = Helpers(mappers_slice, @TypeOf(jws));
+                                const helpers = HelpersType{ .jws = jws };
+                                try Serializer.serialize(field_value, jws, helpers);
+                            } else {
+                                // No mappers configured, pass dummy helpers
+                                const DummyHelpers = struct {
+                                    jws2: @TypeOf(jws),
+                                    pub fn writeMapped(self: @This(), val: anytype) !void {
+                                        try self.jws2.write(val);
+                                    }
+                                };
+                                const dummy = DummyHelpers{ .jws2 = jws };
+                                try Serializer.serialize(field_value, jws, dummy);
+                            }
+                        } else {
+                            // Legacy serializer without helpers support
+                            try Serializer.serialize(field_value, jws);
+                        }
                     } else {
                         // Fallback to default
                         try jws.write(field_value);
@@ -184,6 +216,42 @@ fn writeStructFields(value: anytype, jws: anytype, comptime MapperType: type) !v
             }
         }
     }
+}
+
+/// Create a type-to-mapper lookup table at comptime
+/// Returns the mapper type for a given value type, or null if not found
+fn findMapperForType(comptime ValueType: type, comptime mappers: []const type) ?type {
+    inline for (mappers) |MapperType| {
+        if (ValueType == MapperType.TargetType) {
+            return MapperType;
+        }
+    }
+    return null;
+}
+
+/// Create a custom serializer helpers object that provides auto-mapping capabilities
+fn Helpers(comptime mappers: []const type, comptime Jws: type) type {
+    return struct {
+        /// The JSON WriteStream
+        jws: Jws,
+
+        /// Write a value to JSON, automatically applying a matching mapper if available
+        /// Falls back to standard serialization if no mapper matches
+        pub fn writeMapped(self: @This(), value: anytype) !void {
+            const ValueType = @TypeOf(value);
+
+            @setEvalBranchQuota(10000);
+            const mapper_result = comptime findMapperForType(ValueType, mappers);
+
+            if (comptime mapper_result) |MapperType| {
+                const Adapter = createAdapter(MapperType);
+                try self.jws.write(Adapter{ .value = value });
+            } else {
+                // No matching mapper, use standard serialization
+                try self.jws.write(value);
+            }
+        }
+    };
 }
 
 /// Check if a type has a pub const Mapper declaration
@@ -683,6 +751,12 @@ fn createEnumAdapter(comptime MapperType: type) type {
     };
 }
 
+/// Write a value to JSON WriteStream using its Mapper configuration
+/// This allows custom serializers to recursively apply mappers to nested objects
+///
+/// Usage example:
+/// ```zig
+/// const PropertiesSerializer = struct {
 /// Encode a value using its Mapper configuration
 pub fn encodeWithMapper(
     allocator: std.mem.Allocator,

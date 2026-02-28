@@ -38,20 +38,31 @@ pub const FieldStrategy = union(enum) {
     /// Use nested Mapper for this field
     nested: type,
     /// Custom serialization with optional deserialize
-    custom: struct {
-        /// Serializer type - should have: pub fn serialize(value: T, jws: anytype) !void
-        to: type = void,
-        /// Deserializer type - should have: pub fn deserialize(allocator: Allocator, source: anytype) !T
-        from: type = void,
+    custom: CustomConfig,
+};
 
-        pub fn hasSerializer(comptime self: @This()) bool {
-            return self.to != void;
-        }
+/// Custom serializer/deserializer configuration
+pub const CustomConfig = struct {
+    /// Serializer type - should have: pub fn serialize(value: T, jws: anytype, helpers: ?anytype) !void
+    to: type = void,
+    /// Deserializer type - should have: pub fn deserialize(allocator: Allocator, source: anytype) !T
+    from: type = void,
+    /// Optional array of mapper types for auto-matching in custom serializers
+    /// Example: .with = &.{JsonSchemaMapper, OtherMapper}
+    with: ?[]const type = null,
 
-        pub fn hasDeserializer(comptime self: @This()) bool {
-            return self.from != void;
-        }
-    },
+    pub fn hasSerializer(comptime self: CustomConfig) bool {
+        return self.to != void;
+    }
+
+    pub fn hasDeserializer(comptime self: CustomConfig) bool {
+        return self.from != void;
+    }
+
+    /// Check if any mappers are configured
+    pub fn hasMappers(comptime self: CustomConfig) bool {
+        return self.with != null and self.with.?.len > 0;
+    }
 };
 
 /// Nested configuration - supports both alias and nested Mapper simultaneously
@@ -232,6 +243,7 @@ fn getFieldConfig(comptime config: anytype, comptime field_name: []const u8) Nes
                                     const custom_value = strategy_value.custom;
                                     var SerializerType: type = void;
                                     var DeserializerType: type = void;
+                                    var MappersSlice: ?[]const type = null;
 
                                     const custom_type_info = @typeInfo(@TypeOf(custom_value));
                                     if (custom_type_info == .@"struct") {
@@ -240,11 +252,13 @@ fn getFieldConfig(comptime config: anytype, comptime field_name: []const u8) Nes
                                                 SerializerType = @field(custom_value, "to");
                                             } else if (comptime std.mem.eql(u8, custom_field.name, "from")) {
                                                 DeserializerType = @field(custom_value, "from");
+                                            } else if (comptime std.mem.eql(u8, custom_field.name, "with")) {
+                                                MappersSlice = @field(custom_value, "with");
                                             }
                                         }
                                     }
 
-                                    result.strategy = .{ .custom = .{ .to = SerializerType, .from = DeserializerType } };
+                                    result.strategy = .{ .custom = .{ .to = SerializerType, .from = DeserializerType, .with = MappersSlice } };
                                 }
                             }
                         } else if (strategy_type == FieldStrategy) {

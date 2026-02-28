@@ -975,3 +975,76 @@ test "custom deserializer - simple value conversion" {
     const decoded = try @import("decode.zig").decode(allocator, Data.Mapper, json_str);
     try std.testing.expectEqual(@as(i32, 42), decoded.raw_value);
 }
+
+// Test for custom serializer with helpers - auto-matching nested mapper
+const JsonSchemaInner = struct {
+    type: []const u8,
+    ref: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    pub const Mapper = mapper.Mapper(@This(), .{
+        .ref = .{ .omit_null = true },
+        .description = .{ .omit_null = true },
+    });
+};
+
+const Property3 = struct {
+    name: []const u8,
+    schema: JsonSchemaInner,
+};
+
+const PropertiesSerializer3 = struct {
+    // Note: This serializer accepts a helpers parameter (3 params)
+    pub fn serialize(properties: ?[]const Property3, jws: anytype, helpers: anytype) !void {
+        if (properties) |props| {
+            try jws.beginObject();
+            for (props) |prop| {
+                try jws.objectField(prop.name);
+                // Use helpers.writeMapped to auto-apply matching mapper
+                try helpers.writeMapped(prop.schema);
+            }
+            try jws.endObject();
+        } else {
+            try jws.write(null);
+        }
+    }
+};
+
+const JsonSchema3 = struct {
+    properties: ?[]const Property3 = null,
+    pub const Mapper = mapper.Mapper(@This(), .{
+        .properties = .{
+            .strategy = .{
+                .custom = .{
+                    .to = PropertiesSerializer3,
+                    .with = &.{JsonSchemaInner.Mapper}, // Pass available mappers
+                },
+            },
+        },
+    });
+};
+
+test "custom serializer with helpers - auto-matching nested mapper" {
+    const allocator = std.testing.allocator;
+
+    const schema = JsonSchema3{
+        .properties = &.{
+            .{
+                .name = "message",
+                .schema = .{
+                    .type = "string",
+                    .ref = null,
+                    .description = null,
+                },
+            },
+        },
+    };
+
+    const json_str = try encode(allocator, schema, JsonSchema3.Mapper, .{});
+    defer allocator.free(json_str);
+
+    // Should be {"properties":{"message":{"type":"string"}}}
+    // NOT {"properties":{"message":{"type":"string","ref":null,"description":null}}}
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"properties\":{\"message\":{\"type\":\"string\"}}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"ref\":null") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"description\":null") == null);
+}
