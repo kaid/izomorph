@@ -189,14 +189,37 @@ fn getDiscriminantValue(comptime VariantType: type, comptime discriminant: []con
 
 // ==================== Enum Mapper ====================
 
-/// Enum serialization strategy
-pub const EnumStrategy = enum {
+/// Enum serialization strategy - Tagged Union for mutually exclusive options
+///
+/// Usage:
+///   .strategy = .bare       - Output integer value
+///   .strategy = .string      - Output enum name (default)
+///   .strategy = .{ .custom = .{ .serializer = ..., .deserializer = ... } }
+pub const EnumStrategy = union(enum) {
     /// String mode - output the enum name as string (default)
     string,
     /// Bare mode - output the integer value
     bare,
-    /// Custom mode - use a custom serialization function
-    custom,
+    /// Custom mode - use custom serialization functions
+    custom: EnumCustomConfig,
+};
+
+/// Custom enum configuration - stored as types to allow any signature
+pub const EnumCustomConfig = struct {
+    /// Serializer type - should have: pub fn serialize(value: T) []const u8
+    serializer: type = void,
+    /// Deserializer type - should have: pub fn deserialize(str: []const u8) !T
+    deserializer: type = void,
+
+    /// Check if serializer is provided
+    pub fn hasSerializer(comptime self: EnumCustomConfig) bool {
+        return self.serializer != void;
+    }
+
+    /// Check if deserializer is provided
+    pub fn hasDeserializer(comptime self: EnumCustomConfig) bool {
+        return self.deserializer != void;
+    }
 };
 
 /// Create a Mapper for Enum types with special serialization strategies
@@ -209,17 +232,11 @@ fn EnumMapper(comptime T: type, comptime config: anytype) type {
     // Extract enum strategy from config
     const strategy = comptime getEnumStrategy(config);
 
-    // Extract custom serializer if present
-    const CustomSerializer = comptime getCustomSerializer(T, config);
-
     return struct {
         pub const TargetType = T;
 
         /// Enum serialization strategy
         pub const enum_strategy = strategy;
-
-        /// Custom serializer function (null if not using custom strategy)
-        pub const custom_serializer = CustomSerializer;
     };
 }
 
@@ -229,42 +246,59 @@ fn getEnumStrategy(comptime config: anytype) EnumStrategy {
     if (config_info != .@"struct") return .string;
 
     inline for (config_info.@"struct".fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, "enum_strategy")) {
-            const strategy = @field(config, "enum_strategy");
-            const strategy_type = @TypeOf(strategy);
+        if (comptime std.mem.eql(u8, field.name, "strategy")) {
+            const strategy_value = @field(config, "strategy");
 
-            // Check if it's an EnumStrategy enum value
-            if (strategy_type == EnumStrategy) {
-                return strategy;
+            // Check if it's an explicit EnumStrategy type first
+            if (@TypeOf(strategy_value) == EnumStrategy) {
+                return strategy_value;
             }
 
-            // Check if it's an enum literal like .bare, .string, .custom
-            const strategy_info = @typeInfo(strategy_type);
+            const strategy_info = @typeInfo(@TypeOf(strategy_value));
+
+            // Check if it's an enum literal like .bare, .string
             if (strategy_info == .enum_literal) {
-                const literal_name = @tagName(strategy);
+                const literal_name = @tagName(strategy_value);
                 if (comptime std.mem.eql(u8, literal_name, "bare")) return .bare;
                 if (comptime std.mem.eql(u8, literal_name, "string")) return .string;
-                if (comptime std.mem.eql(u8, literal_name, "custom")) return .custom;
+                @compileError("Unknown enum strategy: " ++ literal_name);
+            }
+
+            // Check if it's a struct literal (must be .custom config)
+            if (strategy_info == .@"struct") {
+                // The struct should be: .{ .custom = .{ .serializer = ..., .deserializer = ... } }
+                inline for (strategy_info.@"struct".fields) |struct_field| {
+                    if (comptime std.mem.eql(u8, struct_field.name, "custom")) {
+                        const custom_value = strategy_value.custom;
+
+                        // Extract serializer and deserializer types from custom config
+                        const CustomConfigType = @TypeOf(custom_value);
+                        const custom_info = @typeInfo(CustomConfigType);
+
+                        var SerializerType: type = void;
+                        var DeserializerType: type = void;
+
+                        if (custom_info == .@"struct") {
+                            inline for (custom_info.@"struct".fields) |custom_field| {
+                                if (comptime std.mem.eql(u8, custom_field.name, "serializer")) {
+                                    // The field value IS the type itself (struct definition)
+                                    SerializerType = @field(custom_value, "serializer");
+                                } else if (comptime std.mem.eql(u8, custom_field.name, "deserializer")) {
+                                    // The field value IS the type itself (struct definition)
+                                    DeserializerType = @field(custom_value, "deserializer");
+                                }
+                            }
+                        }
+
+                        return .{ .custom = .{ .serializer = SerializerType, .deserializer = DeserializerType } };
+                    }
+                }
             }
         }
     }
 
     // Default: string mode
     return .string;
-}
-
-/// Extract custom serializer function from config
-fn getCustomSerializer(comptime T: type, comptime config: anytype) ?*const fn (T) []const u8 {
-    const config_info = @typeInfo(@TypeOf(config));
-    if (config_info != .@"struct") return null;
-
-    inline for (config_info.@"struct".fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, "custom")) {
-            return @field(config, "custom");
-        }
-    }
-
-    return null;
 }
 
 // ==================== Tests ====================

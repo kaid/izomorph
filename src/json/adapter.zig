@@ -580,7 +580,6 @@ fn createUnionAdapter(comptime MapperType: type) type {
 fn createEnumAdapter(comptime MapperType: type) type {
     const T = MapperType.TargetType;
     const strategy = MapperType.enum_strategy;
-    const custom_serializer = MapperType.custom_serializer;
 
     return struct {
         value: T,
@@ -595,10 +594,11 @@ fn createEnumAdapter(comptime MapperType: type) type {
                     // Output integer value
                     try jws.write(@intFromEnum(self.value));
                 },
-                .custom => {
-                    // Use custom serializer
-                    if (custom_serializer) |serializer| {
-                        try jws.write(serializer(self.value));
+                .custom => |custom_config| {
+                    // Check if custom serializer is provided (not void)
+                    if (comptime custom_config.serializer != void) {
+                        const Serializer = custom_config.serializer;
+                        try jws.write(Serializer.serialize(self.value));
                     } else {
                         // Fallback to string if no custom serializer
                         try jws.write(@tagName(self.value));
@@ -620,7 +620,7 @@ fn createEnumAdapter(comptime MapperType: type) type {
                         else => return error.UnexpectedToken,
                     }
                 },
-                .string, .custom => {
+                .string => {
                     // Parse string and match to enum value
                     const token = try source.next();
                     const str = switch (token) {
@@ -636,6 +636,30 @@ fn createEnumAdapter(comptime MapperType: type) type {
                         }
                     }
                     return error.UnknownField;
+                },
+                .custom => |custom_config| {
+                    // Parse string and use custom deserializer
+                    const token = try source.next();
+                    const str = switch (token) {
+                        .string => |s| s,
+                        .allocated_string => |s| s,
+                        else => return error.UnexpectedToken,
+                    };
+
+                    // Check if custom deserializer is provided (not void)
+                    if (comptime custom_config.deserializer != void) {
+                        const Deserializer = custom_config.deserializer;
+                        return try Deserializer.deserialize(str);
+                    } else {
+                        // Fallback to string matching if no custom deserializer
+                        const enum_info = @typeInfo(T).@"enum";
+                        inline for (enum_info.fields) |field| {
+                            if (std.mem.eql(u8, str, field.name)) {
+                                return @enumFromInt(field.value);
+                            }
+                        }
+                        return error.UnknownField;
+                    }
                 },
             }
         }

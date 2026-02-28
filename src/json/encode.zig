@@ -707,7 +707,7 @@ const TestMessageWithId = struct {
 // Test 2: ErrorCode with bare enum strategy
 const TestErrorCode = enum(i32) {
     method_not_found = -32601,
-    pub const Mapper = mapper.Mapper(TestErrorCode, .{ .enum_strategy = .bare });
+    pub const Mapper = mapper.Mapper(TestErrorCode, .{ .strategy = .bare });
 };
 
 const TestErrorResponse = struct {
@@ -732,20 +732,29 @@ const TestServerCapabilities = struct {
 };
 
 // Test 4: TaskStatus with custom enum strategy
+const TestTaskStatusSerializer = struct {
+    pub fn serialize(value: TestTaskStatus) []const u8 {
+        return switch (value) {
+            .queued, .running => "working",
+            .completed => "completed",
+        };
+    }
+};
+
+const TestTaskStatusDeserializer = struct {
+    pub fn deserialize(str: []const u8) !TestTaskStatus {
+        if (std.mem.eql(u8, str, "working")) return .running;
+        if (std.mem.eql(u8, str, "completed")) return .completed;
+        return error.UnknownVariant;
+    }
+};
+
 const TestTaskStatus = enum {
     queued,
     running,
     completed,
     pub const Mapper = mapper.Mapper(TestTaskStatus, .{
-        .enum_strategy = .custom,
-        .custom = struct {
-            pub fn serialize(value: TestTaskStatus) []const u8 {
-                return switch (value) {
-                    .queued, .running => "working",
-                    .completed => "completed",
-                };
-            }
-        }.serialize,
+        .strategy = .{ .custom = .{ .serializer = TestTaskStatusSerializer, .deserializer = TestTaskStatusDeserializer } },
     });
 };
 
