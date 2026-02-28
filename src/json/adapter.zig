@@ -125,8 +125,10 @@ fn writeStructFields(value: anytype, jws: anytype, comptime MapperType: type) !v
             // Use mapped field name
             try jws.objectField(field_meta.serialized_name);
 
-            // If has nested Mapper, recursively serialize
-            if (comptime field_meta.has_nested_mapper) {
+            // If has custom serializer, use it directly
+            if (comptime field_meta.custom_serializer) |custom_fn| {
+                try custom_fn(field_value, jws);
+            } else if (comptime field_meta.has_nested_mapper) {
                 const NestedAdapter = createAdapter(field_meta.nested_mapper);
                 // Unwrap optional if present
                 const info = @typeInfo(@TypeOf(field_value));

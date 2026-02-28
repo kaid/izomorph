@@ -841,3 +841,72 @@ test "nested mapper should not cause double serialization" {
     // Should be {"inner":{"value":42}}, not {"innerinner":...} or similar
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\"inner\":{\"value\":42}") != null);
 }
+
+// Test for custom field serializer - array to map conversion
+test "custom serializer - array to map" {
+    const allocator = std.testing.allocator;
+
+    const Item = struct {
+        id: []const u8,
+        value: i32,
+    };
+
+    const Container = struct {
+        items: []const Item,
+        pub const Mapper = mapper.Mapper(@This(), .{
+            .items = .{
+                .custom = struct {
+                    pub fn serialize(items: []const Item, jws: anytype) !void {
+                        try jws.beginObject();
+                        for (items) |item| {
+                            try jws.objectField(item.id);
+                            try jws.write(item.value);
+                        }
+                        try jws.endObject();
+                    }
+                }.serialize,
+            },
+        });
+    };
+
+    const container = Container{
+        .items = &.{
+            .{ .id = "a", .value = 1 },
+            .{ .id = "b", .value = 2 },
+        },
+    };
+
+    const json_str = try encode(allocator, container, Container.Mapper, .{});
+    defer allocator.free(json_str);
+
+    // Should convert array to map: {"items":{"a":1,"b":2}}
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"items\":{\"a\":1,\"b\":2}") != null);
+}
+
+// Test for custom field serializer - simple formatting
+test "custom serializer - simple formatting" {
+    const allocator = std.testing.allocator;
+
+    const Data = struct {
+        value: i32,
+        pub const Mapper = mapper.Mapper(@This(), .{
+            .value = .{
+                .custom = struct {
+                    pub fn serialize(val: i32, jws: anytype) !void {
+                        // Custom format: wrap in quotes with prefix
+                        var buf: [64]u8 = undefined;
+                        const str = std.fmt.bufPrint(&buf, "value_{d}", .{val}) catch unreachable;
+                        try jws.write(str);
+                    }
+                }.serialize,
+            },
+        });
+    };
+
+    const data = Data{ .value = 42 };
+    const json_str = try encode(allocator, data, Data.Mapper, .{});
+    defer allocator.free(json_str);
+
+    // Should be {"value":"value_42"}
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"value\":\"value_42\"") != null);
+}
