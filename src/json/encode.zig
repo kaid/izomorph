@@ -910,3 +910,52 @@ test "custom serializer - simple formatting" {
     // Should be {"value":"value_42"}
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\"value\":\"value_42\"") != null);
 }
+
+// Test for custom deserializer - simple value conversion
+test "custom deserializer - simple value conversion" {
+    const allocator = std.testing.allocator;
+
+    const Data = struct {
+        raw_value: i32,
+        pub const Mapper = mapper.Mapper(@This(), .{
+            .raw_value = .{
+                .custom = struct {
+                    pub fn serialize(val: i32, jws: anytype) !void {
+                        // Serialize as string with prefix
+                        var buf: [64]u8 = undefined;
+                        const str = std.fmt.bufPrint(&buf, "val_{d}", .{val}) catch unreachable;
+                        try jws.write(str);
+                    }
+                }.serialize,
+                .custom_deserialize = struct {
+                    pub fn deserialize(allocator2: std.mem.Allocator, source: anytype) !i32 {
+                        _ = allocator2;
+                        const token = try source.next();
+                        const str = switch (token) {
+                            .string => |s| s,
+                            .allocated_string => |s| s,
+                            else => return error.UnexpectedToken,
+                        };
+                        // Parse "val_XXX" format
+                        if (str.len < 5 or !std.mem.eql(u8, str[0..4], "val_")) {
+                            return error.SyntaxError;
+                        }
+                        return try std.fmt.parseInt(i32, str[4..], 10);
+                    }
+                },
+            },
+        });
+    };
+
+    // Serialize
+    const data = Data{ .raw_value = 42 };
+    const json_str = try encode(allocator, data, Data.Mapper, .{});
+    defer allocator.free(json_str);
+
+    // Should be {"raw_value":"val_42"}
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"raw_value\":\"val_42\"") != null);
+
+    // Deserialize
+    const decoded = try @import("decode.zig").decode(allocator, Data.Mapper, json_str);
+    try std.testing.expectEqual(@as(i32, 42), decoded.raw_value);
+}

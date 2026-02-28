@@ -17,6 +17,10 @@ pub const UnionStrategy = union(enum) {
 /// Custom serializer function type
 pub const CustomSerializerFn = *const fn (value: anytype, jws: anytype) anyerror!void;
 
+/// Custom deserializer - stored as a type containing the deserialize function
+/// Example: struct { pub fn deserialize(allocator: Allocator, source: anytype) !T { ... } }
+pub const CustomDeserializer = type;
+
 /// Nested configuration - supports both alias and nested Mapper simultaneously
 pub const NestedConfig = struct {
     /// Field alias
@@ -34,6 +38,9 @@ pub const NestedConfig = struct {
     /// Custom serialization function
     /// Signature: fn (value: T, jws: anytype) !void
     custom: ?CustomSerializerFn = null,
+    /// Custom deserialization function
+    /// Type should be: struct { pub fn deserialize(allocator: Allocator, source: anytype) !T { ... } }
+    custom_deserialize: ?type = null,
 };
 
 /// Field mapping rules
@@ -100,6 +107,9 @@ pub const FieldMeta = struct {
     /// Custom serialization function (if exists)
     /// Signature: fn (value: T, jws: anytype) !void
     custom_serializer: ?CustomSerializerFn,
+    /// Custom deserialization type (if exists)
+    /// Type should be: struct { pub fn deserialize(allocator: Allocator, source: anytype) !T { ... } }
+    custom_deserializer: ?type,
 };
 
 /// Type mapping metadata - generated at comptime
@@ -197,6 +207,12 @@ fn generateFieldsRecursive(
         else => null,
     };
 
+    // Determine custom deserializer
+    const custom_deserializer = comptime switch (rule) {
+        .combined => |combined| combined.custom_deserialize,
+        else => null,
+    };
+
     const new_field_meta = FieldMeta{
         .name = field.name,
         .serialized_name = serialized_name,
@@ -211,6 +227,7 @@ fn generateFieldsRecursive(
         .omit_null = omit_null,
         .omit_default = omit_default,
         .custom_serializer = custom_serializer,
+        .custom_deserializer = custom_deserializer,
     };
 
     // Recursively process next field
@@ -256,6 +273,8 @@ fn getFieldRule(comptime config: anytype, comptime field_name: []const u8) Field
                 var omit_default_value: bool = false;
                 var has_custom: bool = false;
                 var custom_value: ?CustomSerializerFn = null;
+                var has_custom_deserialize: bool = false;
+                var custom_deserialize_value: ?type = null;
 
                 inline for (struct_fields) |struct_field| {
                     if (comptime std.mem.eql(u8, struct_field.name, "alias")) {
@@ -276,11 +295,14 @@ fn getFieldRule(comptime config: anytype, comptime field_name: []const u8) Field
                     } else if (comptime std.mem.eql(u8, struct_field.name, "custom")) {
                         has_custom = true;
                         custom_value = raw_value.custom;
+                    } else if (comptime std.mem.eql(u8, struct_field.name, "custom_deserialize")) {
+                        has_custom_deserialize = true;
+                        custom_deserialize_value = raw_value.custom_deserialize;
                     }
                 }
 
                 // If has any combined properties, return combined rule
-                if (has_alias or has_nested or has_element_mapper or omit_null_value or omit_default_value or has_custom) {
+                if (has_alias or has_nested or has_element_mapper or omit_null_value or omit_default_value or has_custom or has_custom_deserialize) {
                     return FieldRule{
                         .combined = .{
                             .alias = alias_value,
@@ -289,6 +311,7 @@ fn getFieldRule(comptime config: anytype, comptime field_name: []const u8) Field
                             .omit_null = omit_null_value,
                             .omit_default = omit_default_value,
                             .custom = custom_value,
+                            .custom_deserialize = custom_deserialize_value,
                         },
                     };
                 }

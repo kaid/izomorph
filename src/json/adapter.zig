@@ -333,6 +333,11 @@ pub fn createStructAdapter(comptime MapperType: type) type {
                 actual_options.max_value_len = std.json.default_max_value_len;
             }
 
+            // If has custom deserializer, use it directly
+            if (comptime field_meta.custom_deserializer) |DeserializerType| {
+                return try DeserializerType.deserialize(allocator, source);
+            }
+
             // If has nested Mapper, create nested decoder using it
             if (comptime field_meta.has_nested_mapper) {
                 const NestedAdapter = createAdapter(field_meta.nested_mapper);
