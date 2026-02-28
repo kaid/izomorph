@@ -156,7 +156,31 @@ fn writeStructFields(value: anytype, jws: anytype, comptime MapperType: type) !v
                     } else if (comptime field_meta.has_element_mapper) {
                         try writeArrayWithElementMapper(jws, field_value, field_meta.element_mapper);
                     } else {
-                        try jws.write(field_value);
+                        // No element mapper configured - try to auto-detect from element type's pub const Mapper
+                        const AutoElementMapper = comptime blk2: {
+                            // Extract element type from array/slice
+                            const ArrayFieldType = @TypeOf(field_value);
+                            const array_field_info = @typeInfo(ArrayFieldType);
+                            if (array_field_info == .pointer and array_field_info.pointer.size == .slice) {
+                                const ElementType = array_field_info.pointer.child;
+                                // Check if element type is a composite type that can have declarations
+                                const element_type_info = @typeInfo(ElementType);
+                                const isCompositeType = element_type_info == .@"struct" or
+                                    element_type_info == .@"union" or
+                                    element_type_info == .@"enum" or
+                                    element_type_info == .@"opaque";
+                                // Check if element type has pub const Mapper
+                                if (isCompositeType and @hasDecl(ElementType, "Mapper")) {
+                                    break :blk2 ElementType.Mapper;
+                                }
+                            }
+                            break :blk2 null;
+                        };
+                        if (AutoElementMapper) |ElementMapper| {
+                            try writeArrayWithElementMapper(jws, field_value, ElementMapper);
+                        } else {
+                            try jws.write(field_value);
+                        }
                     }
                 },
                 .nested => |NestedMapper| {
@@ -170,6 +194,34 @@ fn writeStructFields(value: anytype, jws: anytype, comptime MapperType: type) !v
                         }
                     } else {
                         try jws.write(NestedAdapter{ .value = field_value });
+                    }
+                },
+                .nested_lazy => |getMapper| {
+                    // Lazy evaluation to avoid comptime circular dependency
+                    const NestedMapper = comptime getMapper();
+                    const NestedAdapter = createAdapter(NestedMapper);
+                    const info = @typeInfo(@TypeOf(field_value));
+                    if (info == .optional) {
+                        if (field_value) |payload| {
+                            // Handle single-item pointer types (e.g., *const T) by dereferencing
+                            // Slice types (e.g., []const T) are passed directly
+                            const payload_info = @typeInfo(@TypeOf(payload));
+                            if (payload_info == .pointer and payload_info.pointer.size == .one) {
+                                try jws.write(NestedAdapter{ .value = payload.* });
+                            } else {
+                                try jws.write(NestedAdapter{ .value = payload });
+                            }
+                        } else {
+                            try jws.write(null);
+                        }
+                    } else {
+                        // Handle single-item pointer types (e.g., *const T) by dereferencing
+                        // Slice types (e.g., []const T) are passed directly
+                        if (info == .pointer and info.pointer.size == .one) {
+                            try jws.write(NestedAdapter{ .value = field_value.* });
+                        } else {
+                            try jws.write(NestedAdapter{ .value = field_value });
+                        }
                     }
                 },
                 .custom => |custom_config| {
@@ -187,10 +239,9 @@ fn writeStructFields(value: anytype, jws: anytype, comptime MapperType: type) !v
 
                         if (has_helpers) {
                             // Serializer supports helpers - check if mappers are provided
-                            if (custom_config.with) |mappers| {
-                                // Ensure mappers is a slice
-                                const mappers_slice: []const type = mappers;
-                                const HelpersType = Helpers(mappers_slice, @TypeOf(jws));
+                            const mappers = comptime custom_config.getMappers();
+                            if (mappers.len > 0) {
+                                const HelpersType = Helpers(mappers, @TypeOf(jws));
                                 const helpers = HelpersType{ .jws = jws };
                                 try Serializer.serialize(field_value, jws, helpers);
                             } else {
@@ -220,9 +271,26 @@ fn writeStructFields(value: anytype, jws: anytype, comptime MapperType: type) !v
 
 /// Create a type-to-mapper lookup table at comptime
 /// Returns the mapper type for a given value type, or null if not found
+/// Handles optional, pointer, and pointer-to-array types by unwrapping to the base type
 fn findMapperForType(comptime ValueType: type, comptime mappers: []const type) ?type {
+    // Unwrap the type to find the base type (handles ?T, *T, *const T, etc.)
+    const BaseType = comptime blk: {
+        var t = ValueType;
+        while (true) {
+            const info = @typeInfo(t);
+            if (info == .optional) {
+                t = info.optional.child;
+            } else if (info == .pointer) {
+                t = info.pointer.child;
+            } else {
+                break;
+            }
+        }
+        break :blk t;
+    };
+
     inline for (mappers) |MapperType| {
-        if (ValueType == MapperType.TargetType) {
+        if (BaseType == MapperType.TargetType) {
             return MapperType;
         }
     }
@@ -424,6 +492,12 @@ pub fn createStructAdapter(comptime MapperType: type) type {
                     return try std.json.innerParse(FieldType, allocator, source, actual_options);
                 },
                 .nested => |NestedMapper| {
+                    const NestedAdapter = createAdapter(NestedMapper);
+                    return try NestedAdapter.jsonParse(allocator, source, actual_options);
+                },
+                .nested_lazy => |getMapper| {
+                    // Lazy evaluation to avoid comptime circular dependency
+                    const NestedMapper = comptime getMapper();
                     const NestedAdapter = createAdapter(NestedMapper);
                     return try NestedAdapter.jsonParse(allocator, source, actual_options);
                 },

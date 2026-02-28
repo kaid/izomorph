@@ -26,9 +26,10 @@ pub const CustomDeserializer = type;
 /// Field serialization strategy - Tagged Union for mutually exclusive options
 ///
 /// Usage:
-///   .strategy = .skip                   - Skip this field entirely
-///   .strategy = .default                - Use default serialization
-///   .strategy = .{ .nested = Mapper }   - Use nested mapper
+///   .strategy = .skip                       - Skip this field entirely
+///   .strategy = .default                    - Use default serialization
+///   .strategy = .{ .nested = Mapper }       - Use nested mapper
+///   .strategy = .{ .nested_lazy = getMapper } - Use nested mapper with lazy evaluation
 ///   .strategy = .{ .custom = .{ .to = ..., .from = ... } }  - Custom serialization
 pub const FieldStrategy = union(enum) {
     /// Skip this field during serialization/deserialization
@@ -37,6 +38,9 @@ pub const FieldStrategy = union(enum) {
     default,
     /// Use nested Mapper for this field
     nested: type,
+    /// Use nested Mapper with lazy evaluation (to avoid comptime circular dependency)
+    /// Example: .strategy = .{ .nested_lazy = struct { pub fn get() type { return MyMapper; } }.get }
+    nested_lazy: *const fn () type,
     /// Custom serialization with optional deserialize
     custom: CustomConfig,
 };
@@ -71,6 +75,18 @@ pub const FieldStrategy = union(enum) {
 ///     }},
 /// };
 /// ```
+///
+/// For self-referencing types (to avoid comptime circular dependency):
+/// ```zig
+/// const config = .{
+///     .strategy = .{ .custom = .{
+///         .to = MySerializer,
+///         .with = struct {
+///             pub fn getMappers() []const type { return &.{JsonSchemaMapper}; }
+///         }.getMappers,
+///     }},
+/// };
+/// ```
 pub const CustomConfig = struct {
     /// Serializer type - should have pub fn serialize(...)
     /// Signature: fn (value: T, jws: anytype) !void
@@ -83,7 +99,13 @@ pub const CustomConfig = struct {
     /// Optional array of mapper types for auto-matching in custom serializers.
     /// Used by helpers.writeMapped() to find matching mappers.
     /// Example: .with = &.{JsonSchemaMapper, OtherMapper}
+    ///
+    /// For self-referencing types, use a function that returns the array:
+    /// .with = struct { pub fn get() []const type { return &.{SelfMapper}; } }.get
     with: ?[]const type = null,
+    /// Optional function that returns mappers at comptime (for lazy evaluation)
+    /// This avoids comptime circular dependency for self-referencing types
+    with_lazy: ?*const fn () []const type = null,
 
     pub fn hasSerializer(comptime self: CustomConfig) bool {
         return self.to != void;
@@ -93,9 +115,17 @@ pub const CustomConfig = struct {
         return self.from != void;
     }
 
-    /// Check if any mappers are configured
+    /// Check if any mappers are configured (either direct or lazy)
     pub fn hasMappers(comptime self: CustomConfig) bool {
-        return self.with != null and self.with.?.len > 0;
+        return (self.with != null and self.with.?.len > 0) or self.with_lazy != null;
+    }
+
+    /// Get mappers, evaluating lazy function if present
+    pub fn getMappers(comptime self: CustomConfig) []const type {
+        if (self.with_lazy) |lazy_fn| {
+            return lazy_fn();
+        }
+        return self.with orelse &[_]type{};
     }
 };
 
@@ -105,12 +135,23 @@ pub const NestedConfig = struct {
     alias: ?[]const u8 = null,
     /// Element Mapper type for array/slice fields
     element_mapper: ?type = null,
+    /// Element Mapper getter function for lazy evaluation (to avoid comptime circular dependency)
+    /// Example: .element_mapper_lazy = struct { pub fn get() type { return MyMapper; } }.get
+    element_mapper_lazy: ?*const fn () type = null,
     /// Whether to omit null optional fields during serialization
     omit_null: bool = false,
     /// Whether to omit fields that equal their default value during serialization
     omit_default: bool = false,
     /// Field serialization strategy
     strategy: FieldStrategy = .default,
+
+    /// Get element mapper, evaluating lazy function if present
+    pub fn getElementMapper(comptime self: NestedConfig) ?type {
+        if (self.element_mapper_lazy) |lazy_fn| {
+            return lazy_fn();
+        }
+        return self.element_mapper;
+    }
 };
 
 /// Union for storing comptime-known default values
@@ -203,8 +244,9 @@ fn generateFieldsRecursive(
     const serialized_name = comptime field_config.alias orelse field.name;
 
     // Determine element mapper
-    const has_element = field_config.element_mapper != null;
-    const element_type = field_config.element_mapper orelse void;
+    const element_mapper = comptime field_config.getElementMapper();
+    const has_element = element_mapper != null;
+    const element_type = element_mapper orelse void;
 
     const new_field_meta = FieldMeta{
         .name = field.name,
@@ -258,6 +300,8 @@ fn getFieldConfig(comptime config: anytype, comptime field_name: []const u8) Nes
                         result.alias = @field(raw_value, "alias");
                     } else if (comptime std.mem.eql(u8, struct_field.name, "element_mapper")) {
                         result.element_mapper = @field(raw_value, "element_mapper");
+                    } else if (comptime std.mem.eql(u8, struct_field.name, "element_mapper_lazy")) {
+                        result.element_mapper_lazy = @field(raw_value, "element_mapper_lazy");
                     } else if (comptime std.mem.eql(u8, struct_field.name, "omit_null")) {
                         result.omit_null = @field(raw_value, "omit_null");
                     } else if (comptime std.mem.eql(u8, struct_field.name, "omit_default")) {
@@ -272,12 +316,15 @@ fn getFieldConfig(comptime config: anytype, comptime field_name: []const u8) Nes
                             inline for (strategy_info.@"struct".fields) |strat_field| {
                                 if (comptime std.mem.eql(u8, strat_field.name, "nested")) {
                                     result.strategy = .{ .nested = strategy_value.nested };
+                                } else if (comptime std.mem.eql(u8, strat_field.name, "nested_lazy")) {
+                                    result.strategy = .{ .nested_lazy = strategy_value.nested_lazy };
                                 } else if (comptime std.mem.eql(u8, strat_field.name, "custom")) {
                                     // For custom strategy, we need to extract the custom config
                                     const custom_value = strategy_value.custom;
                                     var SerializerType: type = void;
                                     var DeserializerType: type = void;
                                     var MappersSlice: ?[]const type = null;
+                                    var MappersLazy: ?*const fn () []const type = null;
 
                                     const custom_type_info = @typeInfo(@TypeOf(custom_value));
                                     if (custom_type_info == .@"struct") {
@@ -288,11 +335,13 @@ fn getFieldConfig(comptime config: anytype, comptime field_name: []const u8) Nes
                                                 DeserializerType = @field(custom_value, "from");
                                             } else if (comptime std.mem.eql(u8, custom_field.name, "with")) {
                                                 MappersSlice = @field(custom_value, "with");
+                                            } else if (comptime std.mem.eql(u8, custom_field.name, "with_lazy")) {
+                                                MappersLazy = @field(custom_value, "with_lazy");
                                             }
                                         }
                                     }
 
-                                    result.strategy = .{ .custom = .{ .to = SerializerType, .from = DeserializerType, .with = MappersSlice } };
+                                    result.strategy = .{ .custom = .{ .to = SerializerType, .from = DeserializerType, .with = MappersSlice, .with_lazy = MappersLazy } };
                                 }
                             }
                         } else if (strategy_type == FieldStrategy) {
