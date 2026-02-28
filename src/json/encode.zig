@@ -680,3 +680,140 @@ test "encodeToWriter - zero allocation comparison" {
     // Both should produce identical output
     try std.testing.expectEqualStrings(allocated_result, writer.buffered());
 }
+
+// ============================================================================
+// mzp Integration Tests - Verify fixes for izomorph issues
+// ============================================================================
+
+const json = std.json;
+
+// ============================================================================
+// Test Types - Defined at module level for comptime resolution
+// ============================================================================
+
+// Test 1: RequestId with bare union strategy
+const TestRequestId = union(enum) {
+    string: []const u8,
+    number: i64,
+    pub const Mapper = mapper.Mapper(TestRequestId, .{ .union_strategy = .bare });
+};
+
+const TestMessageWithId = struct {
+    id: TestRequestId,
+    method: []const u8,
+    pub const Mapper = mapper.Mapper(TestMessageWithId, .{});
+};
+
+// Test 2: ErrorCode with bare enum strategy
+const TestErrorCode = enum(i32) {
+    method_not_found = -32601,
+    pub const Mapper = mapper.Mapper(TestErrorCode, .{ .enum_strategy = .bare });
+};
+
+const TestErrorResponse = struct {
+    code: TestErrorCode,
+    message: []const u8,
+    pub const Mapper = mapper.Mapper(TestErrorResponse, .{});
+};
+
+// Test 3: Capability with alias
+const TestCapability = struct {
+    list_changed: bool = false,
+    pub const Mapper = mapper.Mapper(TestCapability, .{
+        .list_changed = .{ .alias = "listChanged" },
+    });
+};
+
+const TestServerCapabilities = struct {
+    tools: ?TestCapability = null,
+    pub const Mapper = mapper.Mapper(TestServerCapabilities, .{
+        .tools = .{ .omit_null = true },
+    });
+};
+
+// Test 4: TaskStatus with custom enum strategy
+const TestTaskStatus = enum {
+    queued,
+    running,
+    completed,
+    pub const Mapper = mapper.Mapper(TestTaskStatus, .{
+        .enum_strategy = .custom,
+        .custom = struct {
+            pub fn serialize(value: TestTaskStatus) []const u8 {
+                return switch (value) {
+                    .queued, .running => "working",
+                    .completed => "completed",
+                };
+            }
+        }.serialize,
+    });
+};
+
+const TestTask = struct {
+    status: TestTaskStatus,
+    pub const Mapper = mapper.Mapper(TestTask, .{});
+};
+
+// ============================================================================
+// Test Functions
+// ============================================================================
+
+test "mzp integration - RequestId with bare union strategy" {
+    const allocator = std.testing.allocator;
+
+    const msg = TestMessageWithId{
+        .id = .{ .number = 42 },
+        .method = "test",
+    };
+
+    const json_str = try encode(allocator, msg, TestMessageWithId.Mapper, .{});
+    defer allocator.free(json_str);
+
+    // Should be {"id":42,"method":"test"}, NOT {"id":{"number":42},"method":"test"}
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"id\":42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"number\":42") == null);
+}
+
+test "mzp integration - ErrorCode with bare enum strategy" {
+    const allocator = std.testing.allocator;
+
+    const err = TestErrorResponse{
+        .code = .method_not_found,
+        .message = "Not found",
+    };
+
+    const json_str = try encode(allocator, err, TestErrorResponse.Mapper, .{});
+    defer allocator.free(json_str);
+
+    // Should be {"code":-32601,"message":"Not found"}, NOT {"code":"method_not_found",...}
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"code\":-32601") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"method_not_found\"") == null);
+}
+
+test "mzp integration - Capability with alias" {
+    const allocator = std.testing.allocator;
+
+    const caps = TestServerCapabilities{
+        .tools = .{ .list_changed = true },
+    };
+
+    const json_str = try encode(allocator, caps, TestServerCapabilities.Mapper, .{});
+    defer allocator.free(json_str);
+
+    // Should contain "listChanged" (alias), NOT "list_changed" (original)
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"listChanged\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"list_changed\"") == null);
+}
+
+test "mzp integration - TaskStatus with custom enum strategy" {
+    const allocator = std.testing.allocator;
+
+    const task = TestTask{ .status = .running };
+
+    const json_str = try encode(allocator, task, TestTask.Mapper, .{});
+    defer allocator.free(json_str);
+
+    // Should be {"status":"working"}, NOT {"status":"running"}
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"status\":\"working\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"running\"") == null);
+}

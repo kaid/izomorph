@@ -37,9 +37,14 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
         return UnionMapper(T, config);
     }
 
+    // Handle Enum types
+    if (type_info == .@"enum") {
+        return EnumMapper(T, config);
+    }
+
     // Verify T is a struct (original behavior)
     if (type_info != .@"struct") {
-        @compileError("Mapper requires a struct or union type, got " ++ @typeName(T));
+        @compileError("Mapper requires a struct, union, or enum type, got " ++ @typeName(T));
     }
 
     // Generate field metadata at comptime
@@ -180,6 +185,86 @@ fn getDiscriminantValue(comptime VariantType: type, comptime discriminant: []con
 
     // Fall back to tag name
     return tag_name;
+}
+
+// ==================== Enum Mapper ====================
+
+/// Enum serialization strategy
+pub const EnumStrategy = enum {
+    /// String mode - output the enum name as string (default)
+    string,
+    /// Bare mode - output the integer value
+    bare,
+    /// Custom mode - use a custom serialization function
+    custom,
+};
+
+/// Create a Mapper for Enum types with special serialization strategies
+fn EnumMapper(comptime T: type, comptime config: anytype) type {
+    const type_info = @typeInfo(T);
+    if (type_info != .@"enum") {
+        @compileError("EnumMapper requires an enum type, got " ++ @typeName(T));
+    }
+
+    // Extract enum strategy from config
+    const strategy = comptime getEnumStrategy(config);
+
+    // Extract custom serializer if present
+    const CustomSerializer = comptime getCustomSerializer(T, config);
+
+    return struct {
+        pub const TargetType = T;
+
+        /// Enum serialization strategy
+        pub const enum_strategy = strategy;
+
+        /// Custom serializer function (null if not using custom strategy)
+        pub const custom_serializer = CustomSerializer;
+    };
+}
+
+/// Extract enum strategy from config
+fn getEnumStrategy(comptime config: anytype) EnumStrategy {
+    const config_info = @typeInfo(@TypeOf(config));
+    if (config_info != .@"struct") return .string;
+
+    inline for (config_info.@"struct".fields) |field| {
+        if (comptime std.mem.eql(u8, field.name, "enum_strategy")) {
+            const strategy = @field(config, "enum_strategy");
+            const strategy_type = @TypeOf(strategy);
+
+            // Check if it's an EnumStrategy enum value
+            if (strategy_type == EnumStrategy) {
+                return strategy;
+            }
+
+            // Check if it's an enum literal like .bare, .string, .custom
+            const strategy_info = @typeInfo(strategy_type);
+            if (strategy_info == .enum_literal) {
+                const literal_name = @tagName(strategy);
+                if (comptime std.mem.eql(u8, literal_name, "bare")) return .bare;
+                if (comptime std.mem.eql(u8, literal_name, "string")) return .string;
+                if (comptime std.mem.eql(u8, literal_name, "custom")) return .custom;
+            }
+        }
+    }
+
+    // Default: string mode
+    return .string;
+}
+
+/// Extract custom serializer function from config
+fn getCustomSerializer(comptime T: type, comptime config: anytype) ?*const fn (T) []const u8 {
+    const config_info = @typeInfo(@TypeOf(config));
+    if (config_info != .@"struct") return null;
+
+    inline for (config_info.@"struct".fields) |field| {
+        if (comptime std.mem.eql(u8, field.name, "custom")) {
+            return @field(config, "custom");
+        }
+    }
+
+    return null;
 }
 
 // ==================== Tests ====================

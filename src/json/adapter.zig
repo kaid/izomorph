@@ -4,6 +4,8 @@
 
 const std = @import("std");
 const meta_module = @import("../meta.zig");
+const mapper_module = @import("../mapper.zig");
+const EnumStrategy = mapper_module.EnumStrategy;
 
 /// Check if value equals the default value
 fn isDefaultValue(value: anytype, comptime default: meta_module.DefaultValueUnion) bool {
@@ -141,15 +143,52 @@ fn writeStructFields(value: anytype, jws: anytype, comptime MapperType: type) !v
                 // Handle array/slice with element mapper
                 try writeArrayWithElementMapper(jws, field_value, field_meta.element_mapper);
             } else {
-                // Otherwise serialize field value directly
-                try jws.write(field_value);
+                // Check if field type has its own Mapper (e.g., union with union_strategy or enum with enum_strategy)
+                const FieldType = @TypeOf(field_value);
+
+                // Handle optional types - unwrap to get inner type
+                const InnerType = comptime blk: {
+                    const type_info = @typeInfo(FieldType);
+                    if (type_info == .optional) {
+                        break :blk type_info.optional.child;
+                    }
+                    break :blk FieldType;
+                };
+
+                if (comptime hasMapper(InnerType)) {
+                    const FieldMapper = getTypeMapper(InnerType);
+                    const FieldAdapter = createAdapter(FieldMapper);
+
+                    // Handle optional unwrapping
+                    const type_info = @typeInfo(FieldType);
+                    if (type_info == .optional) {
+                        if (field_value) |payload| {
+                            try jws.write(FieldAdapter{ .value = payload });
+                        } else {
+                            try jws.write(null);
+                        }
+                    } else {
+                        try jws.write(FieldAdapter{ .value = field_value });
+                    }
+                } else {
+                    // Otherwise serialize field value directly
+                    try jws.write(field_value);
+                }
             }
         }
     }
 }
 
 /// Check if a type has a pub const Mapper declaration
+/// Only checks composite types (struct, union, enum, opaque), not primitives
 fn hasMapper(comptime T: type) bool {
+    const type_info = @typeInfo(T);
+    // Only struct, union, enum, and opaque types can have declarations
+    const isCompositeType = type_info == .@"struct" or type_info == .@"union" or
+        type_info == .@"enum" or type_info == .@"opaque";
+
+    if (!isCompositeType) return false;
+
     return @hasDecl(T, "Mapper");
 }
 
@@ -342,12 +381,14 @@ pub fn createStructAdapter(comptime MapperType: type) type {
 
 /// Create a JSON Adapter type for the given Mapper
 pub fn createAdapter(comptime MapperType: type) type {
-    // Check if this is a union mapper or struct mapper
+    // Check if this is a union mapper, enum mapper, or struct mapper
     const T = MapperType.TargetType;
     const type_info = @typeInfo(T);
 
     if (type_info == .@"union") {
         return createUnionAdapter(MapperType);
+    } else if (type_info == .@"enum") {
+        return createEnumAdapter(MapperType);
     } else {
         return createStructAdapterWrapper(MapperType);
     }
@@ -523,6 +564,72 @@ fn createUnionAdapter(comptime MapperType: type) type {
                 try jws.objectField("value");
                 try jws.write(variant_value);
                 try jws.endObject();
+            }
+        }
+    };
+}
+
+/// Create a JSON Adapter for enum serialization
+fn createEnumAdapter(comptime MapperType: type) type {
+    const T = MapperType.TargetType;
+    const strategy = MapperType.enum_strategy;
+    const custom_serializer = MapperType.custom_serializer;
+
+    return struct {
+        value: T,
+
+        pub fn jsonStringify(self: @This(), jws: anytype) !void {
+            switch (strategy) {
+                .string => {
+                    // Default: output enum name as string
+                    try jws.write(@tagName(self.value));
+                },
+                .bare => {
+                    // Output integer value
+                    try jws.write(@intFromEnum(self.value));
+                },
+                .custom => {
+                    // Use custom serializer
+                    if (custom_serializer) |serializer| {
+                        try jws.write(serializer(self.value));
+                    } else {
+                        // Fallback to string if no custom serializer
+                        try jws.write(@tagName(self.value));
+                    }
+                },
+            }
+        }
+
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !T {
+            _ = allocator;
+            _ = options;
+
+            switch (strategy) {
+                .bare => {
+                    // Parse integer value
+                    const token = try source.next();
+                    switch (token) {
+                        .integer => |i| return @enumFromInt(@as(std.meta.Tag(T), @intCast(i))),
+                        else => return error.UnexpectedToken,
+                    }
+                },
+                .string, .custom => {
+                    // Parse string and match to enum value
+                    const token = try source.next();
+                    const str = switch (token) {
+                        .string => |s| s,
+                        .allocated_string => |s| s,
+                        else => return error.UnexpectedToken,
+                    };
+
+                    const enum_info = @typeInfo(T).@"enum";
+                    inline for (enum_info.fields) |field| {
+                        if (std.mem.eql(u8, str, field.name)) {
+                            return @enumFromInt(field.value);
+                        }
+                    }
+                    return error.UnknownField;
+                },
             }
         }
     };
