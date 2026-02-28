@@ -71,7 +71,7 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
         pub fn shouldSkipField(comptime field_name: []const u8) bool {
             inline for (fields) |field| {
                 if (comptime std.mem.eql(u8, field.name, field_name)) {
-                    return field.should_skip;
+                    return field.strategy == .skip;
                 }
             }
             @compileError("Field '" ++ field_name ++ "' not found in " ++ @typeName(T));
@@ -82,7 +82,7 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
             return comptime blk: {
                 var count: usize = 0;
                 for (fields) |field| {
-                    if (!field.should_skip) count += 1;
+                    if (field.strategy != .skip) count += 1;
                 }
                 break :blk count;
             };
@@ -92,7 +92,7 @@ pub fn Mapper(comptime T: type, comptime config: anytype) type {
         /// Used for field matching during deserialization
         pub fn findFieldBySerializedName(serialized_name: []const u8) ?meta_module.FieldMeta {
             inline for (fields) |field| {
-                if (field.should_skip) continue;
+                if (field.strategy == .skip) continue;
                 if (std.mem.eql(u8, field.serialized_name, serialized_name)) {
                     return field;
                 }

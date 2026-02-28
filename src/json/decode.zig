@@ -147,7 +147,7 @@ test "decode - nested struct" {
     });
 
     const PersonMapper = mapper.Mapper(Person, .{
-        .address = .{ .nested = AddressMapper },
+        .address = .{ .strategy = .{ .nested = AddressMapper } },
     });
 
     const json_str = "{\"name\":\"Dave\",\"address\":{\"road\":\"123 Main St\",\"city\":\"Boston\"}}";
@@ -328,7 +328,7 @@ test "decodeFromReader - nested struct" {
     });
 
     const PersonMapper = mapper.Mapper(Person, .{
-        .address = .{ .nested = AddressMapper },
+        .address = .{ .strategy = .{ .nested = AddressMapper } },
     });
 
     const json_str = "{\"name\":\"Dave\",\"address\":{\"road\":\"123 Main St\",\"city\":\"Boston\"}}";

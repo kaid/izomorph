@@ -247,7 +247,7 @@ test "encode - nested struct with mapping" {
 
     const PersonMapper = mapper.Mapper(Person, .{
         .name = .{ .alias = "full_name" },
-        .address = .{ .nested = AddressMapper },
+        .address = .{ .strategy = .{ .nested = AddressMapper } },
     });
 
     const person = Person{
@@ -352,7 +352,7 @@ test "encode - struct with skip in nested" {
 
     const PersonMapper = mapper.Mapper(Person, .{
         .secret = .skip,
-        .address = .{ .alias = "location", .nested = AddressMapper },
+        .address = .{ .alias = "location", .strategy = .{ .nested = AddressMapper } },
     });
 
     const person = Person{
@@ -601,7 +601,7 @@ test "encodeToWriter - nested struct with mapping" {
 
     const PersonMapper = mapper.Mapper(Person, .{
         .name = .{ .alias = "full_name" },
-        .address = .{ .nested = AddressMapper },
+        .address = .{ .strategy = .{ .nested = AddressMapper } },
     });
 
     const person = Person{
@@ -839,7 +839,7 @@ test "nested mapper should not cause double serialization" {
     const DoubleOuter = struct {
         inner: DoubleInner,
         pub const Mapper = mapper.Mapper(@This(), .{
-            .inner = .{ .nested = DoubleInner.Mapper },
+            .inner = .{ .strategy = .{ .nested = DoubleInner.Mapper } },
         });
     };
 
@@ -852,28 +852,30 @@ test "nested mapper should not cause double serialization" {
 }
 
 // Test for custom field serializer - array to map conversion
+const CustomItem = struct {
+    id: []const u8,
+    value: i32,
+};
+
+const ItemSerializer = struct {
+    pub fn serialize(items: []const CustomItem, jws: anytype) !void {
+        try jws.beginObject();
+        for (items) |item| {
+            try jws.objectField(item.id);
+            try jws.write(item.value);
+        }
+        try jws.endObject();
+    }
+};
+
 test "custom serializer - array to map" {
     const allocator = std.testing.allocator;
 
-    const Item = struct {
-        id: []const u8,
-        value: i32,
-    };
-
     const Container = struct {
-        items: []const Item,
+        items: []const CustomItem,
         pub const Mapper = mapper.Mapper(@This(), .{
             .items = .{
-                .custom = struct {
-                    pub fn serialize(items: []const Item, jws: anytype) !void {
-                        try jws.beginObject();
-                        for (items) |item| {
-                            try jws.objectField(item.id);
-                            try jws.write(item.value);
-                        }
-                        try jws.endObject();
-                    }
-                }.serialize,
+                .strategy = .{ .custom = .{ .to = ItemSerializer } },
             },
         });
     };
@@ -892,6 +894,15 @@ test "custom serializer - array to map" {
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\"items\":{\"a\":1,\"b\":2}") != null);
 }
 
+const ValueSerializer = struct {
+    pub fn serialize(val: i32, jws: anytype) !void {
+        // Custom format: wrap in quotes with prefix
+        var buf: [64]u8 = undefined;
+        const str = std.fmt.bufPrint(&buf, "value_{d}", .{val}) catch unreachable;
+        try jws.write(str);
+    }
+};
+
 // Test for custom field serializer - simple formatting
 test "custom serializer - simple formatting" {
     const allocator = std.testing.allocator;
@@ -900,14 +911,7 @@ test "custom serializer - simple formatting" {
         value: i32,
         pub const Mapper = mapper.Mapper(@This(), .{
             .value = .{
-                .custom = struct {
-                    pub fn serialize(val: i32, jws: anytype) !void {
-                        // Custom format: wrap in quotes with prefix
-                        var buf: [64]u8 = undefined;
-                        const str = std.fmt.bufPrint(&buf, "value_{d}", .{val}) catch unreachable;
-                        try jws.write(str);
-                    }
-                }.serialize,
+                .strategy = .{ .custom = .{ .to = ValueSerializer } },
             },
         });
     };
@@ -920,6 +924,32 @@ test "custom serializer - simple formatting" {
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\"value\":\"value_42\"") != null);
 }
 
+const RawValueSerializer = struct {
+    pub fn serialize(val: i32, jws: anytype) !void {
+        // Serialize as string with prefix
+        var buf: [64]u8 = undefined;
+        const str = std.fmt.bufPrint(&buf, "val_{d}", .{val}) catch unreachable;
+        try jws.write(str);
+    }
+};
+
+const RawValueDeserializer = struct {
+    pub fn deserialize(allocator2: std.mem.Allocator, source: anytype) !i32 {
+        _ = allocator2;
+        const token = try source.next();
+        const str = switch (token) {
+            .string => |s| s,
+            .allocated_string => |s| s,
+            else => return error.UnexpectedToken,
+        };
+        // Parse "val_XXX" format
+        if (str.len < 5 or !std.mem.eql(u8, str[0..4], "val_")) {
+            return error.SyntaxError;
+        }
+        return try std.fmt.parseInt(i32, str[4..], 10);
+    }
+};
+
 // Test for custom deserializer - simple value conversion
 test "custom deserializer - simple value conversion" {
     const allocator = std.testing.allocator;
@@ -928,30 +958,7 @@ test "custom deserializer - simple value conversion" {
         raw_value: i32,
         pub const Mapper = mapper.Mapper(@This(), .{
             .raw_value = .{
-                .custom = struct {
-                    pub fn serialize(val: i32, jws: anytype) !void {
-                        // Serialize as string with prefix
-                        var buf: [64]u8 = undefined;
-                        const str = std.fmt.bufPrint(&buf, "val_{d}", .{val}) catch unreachable;
-                        try jws.write(str);
-                    }
-                }.serialize,
-                .custom_deserialize = struct {
-                    pub fn deserialize(allocator2: std.mem.Allocator, source: anytype) !i32 {
-                        _ = allocator2;
-                        const token = try source.next();
-                        const str = switch (token) {
-                            .string => |s| s,
-                            .allocated_string => |s| s,
-                            else => return error.UnexpectedToken,
-                        };
-                        // Parse "val_XXX" format
-                        if (str.len < 5 or !std.mem.eql(u8, str[0..4], "val_")) {
-                            return error.SyntaxError;
-                        }
-                        return try std.fmt.parseInt(i32, str[4..], 10);
-                    }
-                },
+                .strategy = .{ .custom = .{ .to = RawValueSerializer, .from = RawValueDeserializer } },
             },
         });
     };

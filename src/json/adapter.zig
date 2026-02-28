@@ -121,61 +121,66 @@ fn writeStructFields(value: anytype, jws: anytype, comptime MapperType: type) !v
             }
         }
 
-        if (should_process) {
+        if (should_process and field_meta.strategy != .skip) {
             // Use mapped field name
             try jws.objectField(field_meta.serialized_name);
 
-            // If has custom serializer, use it directly
-            if (comptime field_meta.custom_serializer) |custom_fn| {
-                try custom_fn(field_value, jws);
-            } else if (comptime field_meta.has_nested_mapper) {
-                const NestedAdapter = createAdapter(field_meta.nested_mapper);
-                // Unwrap optional if present
-                const info = @typeInfo(@TypeOf(field_value));
-                if (info == .optional) {
-                    if (field_value) |payload| {
-                        try jws.write(NestedAdapter{ .value = payload });
+            // Handle based on strategy
+            switch (field_meta.strategy) {
+                .skip => unreachable, // Should have been filtered out above
+                .default => {
+                    // Check if field type has its own Mapper
+                    const FieldType = @TypeOf(field_value);
+                    const InnerType = comptime blk: {
+                        const type_info = @typeInfo(FieldType);
+                        if (type_info == .optional) {
+                            break :blk type_info.optional.child;
+                        }
+                        break :blk FieldType;
+                    };
+
+                    if (comptime hasMapper(InnerType)) {
+                        const FieldMapper = getTypeMapper(InnerType);
+                        const FieldAdapter = createAdapter(FieldMapper);
+
+                        const type_info = @typeInfo(FieldType);
+                        if (type_info == .optional) {
+                            if (field_value) |payload| {
+                                try jws.write(FieldAdapter{ .value = payload });
+                            } else {
+                                try jws.write(null);
+                            }
+                        } else {
+                            try jws.write(FieldAdapter{ .value = field_value });
+                        }
+                    } else if (comptime field_meta.has_element_mapper) {
+                        try writeArrayWithElementMapper(jws, field_value, field_meta.element_mapper);
                     } else {
-                        try jws.write(null);
+                        try jws.write(field_value);
                     }
-                } else {
-                    try jws.write(NestedAdapter{ .value = field_value });
-                }
-            } else if (comptime field_meta.has_element_mapper) {
-                // Handle array/slice with element mapper
-                try writeArrayWithElementMapper(jws, field_value, field_meta.element_mapper);
-            } else {
-                // Check if field type has its own Mapper (e.g., union with union_strategy or enum with enum_strategy)
-                const FieldType = @TypeOf(field_value);
-
-                // Handle optional types - unwrap to get inner type
-                const InnerType = comptime blk: {
-                    const type_info = @typeInfo(FieldType);
-                    if (type_info == .optional) {
-                        break :blk type_info.optional.child;
-                    }
-                    break :blk FieldType;
-                };
-
-                if (comptime hasMapper(InnerType)) {
-                    const FieldMapper = getTypeMapper(InnerType);
-                    const FieldAdapter = createAdapter(FieldMapper);
-
-                    // Handle optional unwrapping
-                    const type_info = @typeInfo(FieldType);
-                    if (type_info == .optional) {
+                },
+                .nested => |NestedMapper| {
+                    const NestedAdapter = createAdapter(NestedMapper);
+                    const info = @typeInfo(@TypeOf(field_value));
+                    if (info == .optional) {
                         if (field_value) |payload| {
-                            try jws.write(FieldAdapter{ .value = payload });
+                            try jws.write(NestedAdapter{ .value = payload });
                         } else {
                             try jws.write(null);
                         }
                     } else {
-                        try jws.write(FieldAdapter{ .value = field_value });
+                        try jws.write(NestedAdapter{ .value = field_value });
                     }
-                } else {
-                    // Otherwise serialize field value directly
-                    try jws.write(field_value);
-                }
+                },
+                .custom => |custom_config| {
+                    if (comptime custom_config.hasSerializer()) {
+                        const Serializer = custom_config.to;
+                        try Serializer.serialize(field_value, jws);
+                    } else {
+                        // Fallback to default
+                        try jws.write(field_value);
+                    }
+                },
             }
         }
     }
@@ -333,25 +338,37 @@ pub fn createStructAdapter(comptime MapperType: type) type {
                 actual_options.max_value_len = std.json.default_max_value_len;
             }
 
-            // If has custom deserializer, use it directly
-            if (comptime field_meta.custom_deserializer) |DeserializerType| {
-                return try DeserializerType.deserialize(allocator, source);
+            // Handle based on strategy
+            switch (field_meta.strategy) {
+                .skip => {
+                    // Skip the value
+                    try source.skipValue();
+                    // Return default value
+                    return undefined;
+                },
+                .default => {
+                    // If has element Mapper for arrays/slices
+                    if (comptime field_meta.has_element_mapper) {
+                        const ElementType = @typeInfo(FieldType).pointer.child;
+                        return try parseArrayWithElementMapper(ElementType, allocator, source, field_meta.element_mapper, actual_options);
+                    }
+                    // Otherwise use standard parsing
+                    return try std.json.innerParse(FieldType, allocator, source, actual_options);
+                },
+                .nested => |NestedMapper| {
+                    const NestedAdapter = createAdapter(NestedMapper);
+                    return try NestedAdapter.jsonParse(allocator, source, actual_options);
+                },
+                .custom => |custom_config| {
+                    if (comptime custom_config.hasDeserializer()) {
+                        const Deserializer = custom_config.from;
+                        return try Deserializer.deserialize(allocator, source);
+                    } else {
+                        // Fallback to standard parsing
+                        return try std.json.innerParse(FieldType, allocator, source, actual_options);
+                    }
+                },
             }
-
-            // If has nested Mapper, create nested decoder using it
-            if (comptime field_meta.has_nested_mapper) {
-                const NestedAdapter = createAdapter(field_meta.nested_mapper);
-                return try NestedAdapter.jsonParse(allocator, source, actual_options);
-            }
-
-            // If has element Mapper for arrays/slices
-            if (comptime field_meta.has_element_mapper) {
-                const ElementType = @typeInfo(FieldType).pointer.child;
-                return try parseArrayWithElementMapper(ElementType, allocator, source, field_meta.element_mapper, actual_options);
-            }
-
-            // Otherwise use standard parsing
-            return try std.json.innerParse(FieldType, allocator, source, actual_options);
         }
 
         /// Parse array with element mapper applied to each element
