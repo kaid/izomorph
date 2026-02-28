@@ -135,23 +135,12 @@ pub const NestedConfig = struct {
     alias: ?[]const u8 = null,
     /// Element Mapper type for array/slice fields
     element_mapper: ?type = null,
-    /// Element Mapper getter function for lazy evaluation (to avoid comptime circular dependency)
-    /// Example: .element_mapper_lazy = struct { pub fn get() type { return MyMapper; } }.get
-    element_mapper_lazy: ?*const fn () type = null,
     /// Whether to omit null optional fields during serialization
     omit_null: bool = false,
     /// Whether to omit fields that equal their default value during serialization
     omit_default: bool = false,
     /// Field serialization strategy
     strategy: FieldStrategy = .default,
-
-    /// Get element mapper, evaluating lazy function if present
-    pub fn getElementMapper(comptime self: NestedConfig) ?type {
-        if (self.element_mapper_lazy) |lazy_fn| {
-            return lazy_fn();
-        }
-        return self.element_mapper;
-    }
 };
 
 /// Union for storing comptime-known default values
@@ -244,9 +233,8 @@ fn generateFieldsRecursive(
     const serialized_name = comptime field_config.alias orelse field.name;
 
     // Determine element mapper
-    const element_mapper = comptime field_config.getElementMapper();
-    const has_element = element_mapper != null;
-    const element_type = element_mapper orelse void;
+    const has_element = field_config.element_mapper != null;
+    const element_type = field_config.element_mapper orelse void;
 
     const new_field_meta = FieldMeta{
         .name = field.name,
@@ -300,8 +288,6 @@ fn getFieldConfig(comptime config: anytype, comptime field_name: []const u8) Nes
                         result.alias = @field(raw_value, "alias");
                     } else if (comptime std.mem.eql(u8, struct_field.name, "element_mapper")) {
                         result.element_mapper = @field(raw_value, "element_mapper");
-                    } else if (comptime std.mem.eql(u8, struct_field.name, "element_mapper_lazy")) {
-                        result.element_mapper_lazy = @field(raw_value, "element_mapper_lazy");
                     } else if (comptime std.mem.eql(u8, struct_field.name, "omit_null")) {
                         result.omit_null = @field(raw_value, "omit_null");
                     } else if (comptime std.mem.eql(u8, struct_field.name, "omit_default")) {
