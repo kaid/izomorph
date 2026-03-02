@@ -5,6 +5,7 @@
 const std = @import("std");
 const meta_module = @import("../meta.zig");
 const mapper_module = @import("../mapper.zig");
+const root_codec = @import("root_codec.zig");
 const EnumStrategy = mapper_module.EnumStrategy;
 
 /// Check if value equals the default value
@@ -553,8 +554,231 @@ pub fn createStructAdapter(comptime MapperType: type) type {
     };
 }
 
+/// Create a JSON Adapter for explicit root codecs (top-level array/map).
+fn createRootAdapter(comptime RootCodecType: type) type {
+    const kind = RootCodecType.kind;
+
+    return struct {
+        value: RootCodecType.TargetType,
+
+        pub fn jsonStringify(self: @This(), jws: anytype) !void {
+            switch (kind) {
+                .array_mapper => try stringifyArrayWithMapper(self.value, jws),
+                .array_plain => try stringifyArrayPlain(self.value, jws),
+                .map_mapper => try stringifyMapWithMapper(self.value, jws),
+                .map_plain => try stringifyMapPlain(self.value, jws),
+                .map_ordered_mapper => try stringifyMapWithMapper(self.value, jws),
+                .map_ordered_plain => try stringifyMapPlain(self.value, jws),
+            }
+        }
+
+        pub fn jsonParse(
+            allocator: std.mem.Allocator,
+            source: anytype,
+            options: std.json.ParseOptions,
+        ) !RootCodecType.TargetType {
+            var actual_options = options;
+            if (actual_options.allocate == null) {
+                actual_options.allocate = .alloc_if_needed;
+            }
+            if (actual_options.max_value_len == null) {
+                actual_options.max_value_len = std.json.default_max_value_len;
+            }
+
+            switch (kind) {
+                .array_mapper => return try parseArrayWithMapper(allocator, source, actual_options),
+                .array_plain => return try parseArrayPlain(allocator, source, actual_options),
+                .map_mapper => return try parseMapWithMapper(allocator, source, actual_options),
+                .map_plain => return try parseMapPlain(allocator, source, actual_options),
+                .map_ordered_mapper => return try parseMapWithMapper(allocator, source, actual_options),
+                .map_ordered_plain => return try parseMapPlain(allocator, source, actual_options),
+            }
+        }
+
+        fn stringifyArrayWithMapper(value: RootCodecType.TargetType, jws: anytype) !void {
+            const ElementAdapter = createAdapter(RootCodecType.ElementMapperType);
+
+            try jws.beginArray();
+            for (value) |element| {
+                try jws.write(ElementAdapter{ .value = element });
+            }
+            try jws.endArray();
+        }
+
+        fn stringifyArrayPlain(value: RootCodecType.TargetType, jws: anytype) !void {
+            try jws.beginArray();
+            for (value) |element| {
+                try jws.write(element);
+            }
+            try jws.endArray();
+        }
+
+        fn stringifyMapWithMapper(value: RootCodecType.TargetType, jws: anytype) !void {
+            const ValueAdapter = createAdapter(RootCodecType.ValueMapperType);
+
+            try jws.beginObject();
+            var it = value.iterator();
+            while (it.next()) |entry| {
+                try jws.objectField(entry.key_ptr.*);
+                try jws.write(ValueAdapter{ .value = entry.value_ptr.* });
+            }
+            try jws.endObject();
+        }
+
+        fn stringifyMapPlain(value: RootCodecType.TargetType, jws: anytype) !void {
+            try jws.beginObject();
+            var it = value.iterator();
+            while (it.next()) |entry| {
+                try jws.objectField(entry.key_ptr.*);
+                try jws.write(entry.value_ptr.*);
+            }
+            try jws.endObject();
+        }
+
+        fn parseArrayWithMapper(
+            allocator: std.mem.Allocator,
+            source: anytype,
+            options: std.json.ParseOptions,
+        ) !RootCodecType.TargetType {
+            const ElementAdapter = createAdapter(RootCodecType.ElementMapperType);
+
+            if (.array_begin != try source.next()) return error.UnexpectedToken;
+
+            var list: std.ArrayList(RootCodecType.ElementType) = .empty;
+            errdefer list.deinit(allocator);
+
+            while (true) {
+                if (try source.peekNextTokenType() == .array_end) {
+                    _ = try source.next();
+                    break;
+                }
+
+                const element = try ElementAdapter.jsonParse(allocator, source, options);
+                try list.append(allocator, element);
+            }
+
+            return list.toOwnedSlice(allocator);
+        }
+
+        fn parseArrayPlain(
+            allocator: std.mem.Allocator,
+            source: anytype,
+            options: std.json.ParseOptions,
+        ) !RootCodecType.TargetType {
+            if (.array_begin != try source.next()) return error.UnexpectedToken;
+
+            var list: std.ArrayList(RootCodecType.ElementType) = .empty;
+            errdefer list.deinit(allocator);
+
+            while (true) {
+                if (try source.peekNextTokenType() == .array_end) {
+                    _ = try source.next();
+                    break;
+                }
+
+                const element = try std.json.innerParse(RootCodecType.ElementType, allocator, source, options);
+                try list.append(allocator, element);
+            }
+
+            return list.toOwnedSlice(allocator);
+        }
+
+        fn parseMapWithMapper(
+            allocator: std.mem.Allocator,
+            source: anytype,
+            options: std.json.ParseOptions,
+        ) !RootCodecType.TargetType {
+            const ValueAdapter = createAdapter(RootCodecType.ValueMapperType);
+
+            if (.object_begin != try source.next()) return error.UnexpectedToken;
+
+            var result = RootCodecType.TargetType.init();
+            errdefer result.deinit(allocator);
+
+            while (true) {
+                const name_token = try source.nextAllocMax(allocator, options.allocate.?, options.max_value_len.?);
+                const json_key = switch (name_token) {
+                    inline .string, .allocated_string => |slice| slice,
+                    .object_end => break,
+                    else => return error.UnexpectedToken,
+                };
+                defer switch (name_token) {
+                    .allocated_string => |slice| allocator.free(slice),
+                    else => {},
+                };
+
+                const has_duplicate = result.contains(json_key);
+                if (has_duplicate) {
+                    switch (options.duplicate_field_behavior) {
+                        .use_first => {
+                            try source.skipValue();
+                            continue;
+                        },
+                        .@"error" => return error.DuplicateField,
+                        .use_last => {},
+                    }
+                }
+
+                const value = try ValueAdapter.jsonParse(allocator, source, options);
+                const owned_key = try allocator.dupe(u8, json_key);
+                errdefer allocator.free(owned_key);
+                try result.putOwnedKey(allocator, owned_key, value);
+            }
+
+            return result;
+        }
+
+        fn parseMapPlain(
+            allocator: std.mem.Allocator,
+            source: anytype,
+            options: std.json.ParseOptions,
+        ) !RootCodecType.TargetType {
+            if (.object_begin != try source.next()) return error.UnexpectedToken;
+
+            var result = RootCodecType.TargetType.init();
+            errdefer result.deinit(allocator);
+
+            while (true) {
+                const name_token = try source.nextAllocMax(allocator, options.allocate.?, options.max_value_len.?);
+                const json_key = switch (name_token) {
+                    inline .string, .allocated_string => |slice| slice,
+                    .object_end => break,
+                    else => return error.UnexpectedToken,
+                };
+                defer switch (name_token) {
+                    .allocated_string => |slice| allocator.free(slice),
+                    else => {},
+                };
+
+                const has_duplicate = result.contains(json_key);
+                if (has_duplicate) {
+                    switch (options.duplicate_field_behavior) {
+                        .use_first => {
+                            try source.skipValue();
+                            continue;
+                        },
+                        .@"error" => return error.DuplicateField,
+                        .use_last => {},
+                    }
+                }
+
+                const value = try std.json.innerParse(RootCodecType.ValueType, allocator, source, options);
+                const owned_key = try allocator.dupe(u8, json_key);
+                errdefer allocator.free(owned_key);
+                try result.putOwnedKey(allocator, owned_key, value);
+            }
+
+            return result;
+        }
+    };
+}
+
 /// Create a JSON Adapter type for the given Mapper
 pub fn createAdapter(comptime MapperType: type) type {
+    if (comptime root_codec.isRootCodec(MapperType)) {
+        return createRootAdapter(MapperType);
+    }
+
     // Check if this is a union mapper, enum mapper, or struct mapper
     const T = MapperType.TargetType;
     const type_info = @typeInfo(T);
@@ -857,17 +1081,12 @@ pub fn decodeWithMapper(
     allocator: std.mem.Allocator,
     comptime MapperType: type,
     json_str: []const u8,
+    options: std.json.ParseOptions,
 ) !MapperType.TargetType {
     const Adapter = createAdapter(MapperType);
 
     var scanner = std.json.Scanner.initCompleteInput(allocator, json_str);
     defer scanner.deinit();
-
-    const options = std.json.ParseOptions{
-        .ignore_unknown_fields = true,
-        .duplicate_field_behavior = .use_last,
-        .max_value_len = json_str.len,
-    };
 
     return try Adapter.jsonParse(allocator, &scanner, options);
 }
@@ -877,18 +1096,12 @@ pub fn decodeWithReader(
     allocator: std.mem.Allocator,
     comptime MapperType: type,
     reader: *std.Io.Reader,
+    options: std.json.ParseOptions,
 ) !MapperType.TargetType {
     const Adapter = createAdapter(MapperType);
 
     var json_reader = std.json.Reader.init(allocator, reader);
     defer json_reader.deinit();
-
-    const options = std.json.ParseOptions{
-        .ignore_unknown_fields = true,
-        .duplicate_field_behavior = .use_last,
-        .max_value_len = std.json.default_max_value_len,
-        .allocate = .alloc_always,
-    };
 
     return try Adapter.jsonParse(allocator, &json_reader, options);
 }

@@ -28,7 +28,7 @@
 //! const json_str = try izo.json.encode(allocator, person, PersonMapper, .{});
 //!
 //! // Decode from JSON
-//! const decoded = try izo.json.decode(allocator, PersonMapper, json_str);
+//! const decoded = try izo.json.decode(allocator, PersonMapper, json_str, .{});
 //! ```
 
 const std = @import("std");
@@ -49,6 +49,8 @@ pub const Mapper = @import("mapper.zig").Mapper;
 
 /// JSON serialization module
 pub const json = struct {
+    /// Root codec factory for explicit top-level JSON array/map
+    pub const Root = @import("json/root_codec.zig").Root;
     /// JSON encoder
     pub const encode = @import("json/encode.zig").encode;
     /// JSON encoder to writer (zero-allocation streaming)
@@ -96,7 +98,7 @@ test "izomorph - full API usage" {
     try std.testing.expectEqualStrings("{\"person_name\":\"Alice\",\"age\":30}", json_str);
 
     // Decode JSON
-    const decoded = try json.decode(allocator, PersonMapper, json_str);
+    const decoded = try json.decode(allocator, PersonMapper, json_str, .{});
     try std.testing.expectEqualStrings("Alice", decoded.name);
     try std.testing.expectEqual(@as(u32, 30), decoded.age);
 }

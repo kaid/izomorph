@@ -972,7 +972,7 @@ test "custom deserializer - simple value conversion" {
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\"raw_value\":\"val_42\"") != null);
 
     // Deserialize
-    const decoded = try @import("decode.zig").decode(allocator, Data.Mapper, json_str);
+    const decoded = try @import("decode.zig").decode(allocator, Data.Mapper, json_str, .{});
     try std.testing.expectEqual(@as(i32, 42), decoded.raw_value);
 }
 
